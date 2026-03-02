@@ -189,46 +189,13 @@
         ]
       },
       {
-        "tab": "Supported Models",
-        "pages": [
-          "docs/supported-models",
-          {
-            "group": "Text generation",
-            "pages": [
-              "docs/supported-models/large-language-models",
-              "docs/supported-models/vision-language-models",
-              "docs/supported-models/diffusion-language-models"
-            ]
-          },
-          {
-            "group": "Retrieval and ranking",
-            "pages": [
-              "docs/supported-models/embedding-models",
-              "docs/supported-models/rerank-models",
-              "docs/supported-models/classification-models"
-            ]
-          },
-            {
-              "group": "Specialized models",
-              "pages": [
-                "docs/supported-models/reward-models"
-              ]
-            }
-          ]
-      },
-      {
-        "tab": "SGLang Diffusion",
-        "pages": [
-          "docs/sglang-diffusion/index"
-        ]
-      },
-      {
         "tab": "Cookbook",
         "pages": [
           "cookbook/intro",
           {
             "group": "Autoregressive Models",
             "pages": [
+              "cookbook/autoregressive/intro",
               {
                 "group": "Qwen",
                 "pages": [
@@ -365,6 +332,7 @@
           {
             "group": "Diffusion Models",
             "pages": [
+              "cookbook/diffusion/intro",
               {
                 "group": "FLUX",
                 "pages": [
