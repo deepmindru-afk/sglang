@@ -1329,6 +1329,9 @@ class HiRadixCache(RadixCache):
             self._update_host_leaf_status(new_node)
             self._update_leaf_status(node)
             self._update_host_leaf_status(node)
+            # Publish the newly materialized host suffix immediately so downstream
+            # cache indexers can resolve descendants that extend this L2-only prefix.
+            self._record_store_event(new_node)
 
         return matched_length
 
