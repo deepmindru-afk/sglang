@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-03-26T00:13:34.092041Z",
+  "generatedAt": "2026-03-26T12:14:31.275067Z",
   "sourceRepo": "https://github.com/lm-sys/lm-sys.github.io/tree/main/blog",
   "keywords": [
     "sglang",
@@ -14,17 +14,17 @@
   "cardsPublished": 6,
   "posts": [
     {
+      "slug": "2026-03-25-eep-partial-failure-tolerance",
+      "title": "Elastic EP in SGLang: Achieving Partial Failure Tolerance for DeepSeek MoE Deployments",
+      "url": "https://lmsys.org/blog/2026-03-25-eep-partial-failure-tolerance/",
+      "image": "https://lmsys.org/images/blog/eep-partial-failure-tolerance/figure.png",
+      "date": "March 25, 2026"
+    },
+    {
       "slug": "2026-03-17-rocm-miles-rl-amd",
       "title": "ROCm Support for Miles: Large-Scale RL Post-Training on AMD Instinct\u2122 GPUs",
       "url": "https://lmsys.org/blog/2026-03-17-rocm-miles-rl-amd/",
       "image": "https://lmsys.org/images/blog/rocm_miles_rl/fig_1.png",
-      "date": "March 17, 2026"
-    },
-    {
-      "slug": "2026-03-17-eep-partial-failure-tolerance",
-      "title": "Elastic EP in SGLang: Achieving Partial Failure Tolerance for DeepSeek MoE Deployments",
-      "url": "https://lmsys.org/blog/2026-03-17-eep-partial-failure-tolerance/",
-      "image": "https://lmsys.org/images/blog/eep-partial-failure-tolerance/figure.png",
       "date": "March 17, 2026"
     },
     {
