@@ -85,7 +85,6 @@ from sglang.srt.managers.io_struct import (
     ActiveRanksOutput,
     AttachHiCacheStorageReqInput,
     AttachHiCacheStorageReqOutput,
-    BaseBatchReq,
     BaseReq,
     BatchTokenizedEmbeddingReqInput,
     BatchTokenizedGenerateReqInput,
@@ -141,6 +140,7 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromIPCReqInput,
     UpdateWeightsFromTensorReqInput,
+    send_msgpack,
 )
 from sglang.srt.managers.mm_utils import init_mm_embedding_cache, unwrap_shm_features
 from sglang.srt.managers.multimodal_processor import get_mm_processor, import_processors
@@ -479,7 +479,9 @@ class Scheduler(
                 )
 
             self.send_to_tokenizer = SenderWrapper(send_to_tokenizer)
-            self.send_to_detokenizer = SenderWrapper(send_to_detokenizer)
+            self.send_to_detokenizer = SenderWrapper(
+                send_to_detokenizer, use_msgpack=True
+            )
 
             if self.server_args.sleep_on_idle:
                 self.idle_sleeper = IdleSleeper(
@@ -3429,26 +3431,28 @@ def is_work_request(recv_req):
 
 
 class SenderWrapper:
-    def __init__(self, socket: zmq.Socket):
+    def __init__(self, socket: zmq.Socket, use_msgpack: bool = False):
         self.socket = socket
+        self.use_msgpack = use_msgpack
 
     def send_output(
         self,
-        output: Union[BaseReq, BaseBatchReq],
-        recv_obj: Optional[Union[BaseReq, BaseBatchReq]] = None,
+        output,
+        recv_obj=None,
     ):
         if self.socket is None:
             return
 
-        if (
-            isinstance(recv_obj, BaseReq)
-            and recv_obj.http_worker_ipc is not None
-            and output.http_worker_ipc is None
-        ):
-            # handle communicator reqs for multi-http worker case
-            output.http_worker_ipc = recv_obj.http_worker_ipc
-
-        self.socket.send_pyobj(output)
+        if self.use_msgpack:
+            send_msgpack(self.socket, output)
+        else:
+            if (
+                isinstance(recv_obj, BaseReq)
+                and recv_obj.http_worker_ipc is not None
+                and output.http_worker_ipc is None
+            ):
+                output.http_worker_ipc = recv_obj.http_worker_ipc
+            self.socket.send_pyobj(output)
 
 
 def dispatch_event_loop(scheduler: Scheduler):
