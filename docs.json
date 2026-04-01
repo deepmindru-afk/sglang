@@ -243,6 +243,7 @@
             "icon": "microchip",
             "pages": [
               "docs/hardware-platforms/overview",
+              "docs/hardware-platforms/nvidia-gpus",
               "docs/hardware-platforms/amd-gpus",
               {
                 "group": "Ascend NPUs",
