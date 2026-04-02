@@ -86,8 +86,8 @@ git push origin my-changes
 
 ### Adding a new cookbook recipe
 
-1. Create a new `.mdx` file under `cookbook/` following the existing directory structure (e.g., `cookbook/autoregressive/<Vendor>/<Model>.mdx`)
-2. Use an existing recipe like `cookbook/autoregressive/Qwen/Qwen3.5.mdx` as a template
+1. Create a new `.mdx` file under `cookbook/` following the existing directory structure (e.g., `cookbook/llm/<Vendor>/<Model>.mdx` or `cookbook/vlm/<Vendor>/<Model>.mdx`)
+2. Use an existing recipe like `cookbook/llm/Qwen/Qwen3.5.mdx` as a template
 3. Add your page to the navigation in `docs.json`
 4. Each recipe should include:
    - Model introduction and key specs
