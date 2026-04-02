@@ -12,99 +12,75 @@ You can install SGLang using one of the methods below.
 This page primarily applies to common NVIDIA GPU platforms.
 For other or newer platforms, please refer to the dedicated pages for [AMD GPUs](../hardware-platforms/amd-gpus), [Intel Xeon CPUs](../hardware-platforms/cpu-server), [Google TPU](../hardware-platforms/tpu), [NVIDIA DGX Spark](https://lmsys.org/blog/2025-11-03-gpt-oss-on-nvidia-dgx-spark/), [NVIDIA Jetson](../hardware-platforms/nvidia), [Ascend NPUs](../hardware-platforms/ascend-npus/SGLang installation with NPUs support), and [Intel XPU](../hardware-platforms/xpu).
 
-## Documentation index
-
-<Info>
-Fetch the complete documentation index at [cookbook.sglang.io/llms.txt](https://cookbook.sglang.io/llms.txt). Use this file to discover all available pages before exploring further.
-</Info>
-
 <a id="install-methods"></a>
 ## Install methods
 
 <Tabs>
-  <Tab title="pip or uv">
-    Use <Tooltip tip="A fast Python package manager.">uv</Tooltip> for faster installation.
-
-    1. **Upgrade pip**
+  <Tab title="Pip or uv">
+    It is recommended to use <Tooltip tip="A fast Python package manager.">uv</Tooltip> for faster installation:
 
     ```bash
     pip install --upgrade pip
-    ```
-
-    2. **Install uv**
-
-    ```bash
     pip install uv
-    ```
-
-    3. **Install SGLang**
-
-    ```bash
     uv pip install "sglang"
     ```
 
-    **Quick fixes to common problems**
+    ### Quick fixes to common problems
 
-    **Wrong torch version**
+    <AccordionGroup>
+      <Accordion title="Wrong torch version">
+        In some cases (for example, GB200), the command above might install a wrong torch version (for example, the CPU version) due to dependency resolution. Reinstall the correct [PyTorch](https://pytorch.org/get-started/locally/) with the following:
 
-    In some cases (for example, GB200), the command above might install a wrong torch version (for example, the CPU version) due to dependency resolution. Reinstall the correct [PyTorch](https://pytorch.org/get-started/locally/) with the following:
+        ```bash
+        uv pip install "torch" "torchvision" --extra-index-url https://download.pytorch.org/whl/cu129 --force-reinstall
+        ```
+      </Accordion>
 
-    ```bash
-    uv pip install "torch" "torchvision" --extra-index-url https://download.pytorch.org/whl/cu129 --force-reinstall
-    ```
+      <Accordion title="CUDA 13 without Docker">
+        If you do not have Docker access, install the matching `sgl_kernel` wheel from [the sgl-project whl releases](https://github.com/sgl-project/whl/releases) after installing SGLang. Replace `X.Y.Z` with the `sgl_kernel` version required by your SGLang (you can find this by running `uv pip show sgl_kernel`).
 
-    **CUDA 13 without Docker**
+        **x86_64**
 
-    If you do not have Docker access, install the matching `sgl_kernel` wheel from [the sgl-project whl releases](https://github.com/sgl-project/whl/releases) after installing SGLang. Replace `X.Y.Z` with the `sgl_kernel` version required by your SGLang (you can find this by running `uv pip show sgl_kernel`).
+        ```bash
+        uv pip install "https://github.com/sgl-project/whl/releases/download/vX.Y.Z/sgl_kernel-X.Y.Z+cu130-cp310-abi3-manylinux2014_x86_64.whl"
+        ```
 
-    **x86_64**
+        **aarch64**
 
-    ```bash
-    uv pip install "https://github.com/sgl-project/whl/releases/download/vX.Y.Z/sgl_kernel-X.Y.Z+cu130-cp310-abi3-manylinux2014_x86_64.whl"
-    ```
+        ```bash
+        uv pip install "https://github.com/sgl-project/whl/releases/download/vX.Y.Z/sgl_kernel-X.Y.Z+cu130-cp310-abi3-manylinux2014_aarch64.whl"
+        ```
+      </Accordion>
 
-    **aarch64**
+      <Accordion title="CUDA_HOME not set">
+        Choose one of the following solutions:
 
-    ```bash
-    uv pip install "https://github.com/sgl-project/whl/releases/download/vX.Y.Z/sgl_kernel-X.Y.Z+cu130-cp310-abi3-manylinux2014_aarch64.whl"
-    ```
+        1. Set `CUDA_HOME` to your CUDA install root:
 
-    **CUDA_HOME not set**
+        ```bash
+        export CUDA_HOME=/usr/local/cuda-<your-cuda-version>
+        ```
 
-    Choose one of the following solutions:
-
-    1. Set `CUDA_HOME` to your CUDA install root:
-
-    ```bash
-    export CUDA_HOME=/usr/local/cuda-<your-cuda-version>
-    ```
-
-    2. Install FlashInfer first following the [FlashInfer installation doc](https://docs.flashinfer.ai/installation.html), then install SGLang as described above.
+        2. Install FlashInfer first following the [FlashInfer installation doc](https://docs.flashinfer.ai/installation.html), then install SGLang as described above.
+      </Accordion>
+    </AccordionGroup>
   </Tab>
 
   <Tab title="From source">
-1. **Clone the repo**
-
 ```bash
 git clone https://github.com/sgl-project/sglang.git
-```
-
-2. **Enter the repo**
-
-```bash
 cd sglang
-```
-
-3. **Install the Python package**
-
-```bash
 pip install --upgrade pip
 pip install -e "python"
 ```
 
-    **Quick fixes to common problems**
+    ### Quick fixes to common problems
 
-    - If you want to develop SGLang, try the dev docker image. Refer to [setup docker container](../developer_guide/development_guide_using_docker#setup-docker-container). The docker image is `lmsysorg/sglang:dev`.
+    <AccordionGroup>
+      <Accordion title="Development setup">
+        If you want to develop SGLang, try the dev docker image. Refer to [setup docker container](../developer_guide/development_guide_using_docker#setup-docker-container). The docker image is `lmsysorg/sglang:dev`.
+      </Accordion>
+    </AccordionGroup>
   </Tab>
 
   <Tab title="Docker">
@@ -147,21 +123,23 @@ pip install -e "python"
   <Tab title="Kubernetes">
     Please check out [OME](https://github.com/sgl-project/ome), a Kubernetes operator for enterprise-grade management and serving of large language models (LLMs).
 
-    **Single node serving**
+    <Tabs>
+      <Tab title="Single node serving">
+        For models that fit into GPUs on one node, create the deployment and service with llama-31-8b as example.
 
-    For models that fit into GPUs on one node, create the deployment and service with llama-31-8b as example.
+        ```bash
+        kubectl apply -f docker/k8s-sglang-service.yaml
+        ```
+      </Tab>
 
-    ```bash
-    kubectl apply -f docker/k8s-sglang-service.yaml
-    ```
+      <Tab title="Multi-node serving">
+        For larger models (for example, `DeepSeek-R1`), modify the model path and arguments, then create the statefulset and service.
 
-    **Multi-node serving**
-
-    For larger models (for example, `DeepSeek-R1`), modify the model path and arguments, then create the statefulset and service.
-
-    ```bash
-    kubectl apply -f docker/k8s-sglang-distributed-sts.yaml
-    ```
+        ```bash
+        kubectl apply -f docker/k8s-sglang-distributed-sts.yaml
+        ```
+      </Tab>
+    </Tabs>
   </Tab>
 
   <Tab title="Docker Compose">

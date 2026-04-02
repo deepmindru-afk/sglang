@@ -27,15 +27,11 @@
   },
   "fonts": {
     "heading": {
-      "family": "Approach",
-      "source": "/fonts/Approach-Medium.woff2",
-      "format": "woff2",
-      "weight": 500
+      "family": "Inter",
+      "weight": 600
     },
     "body": {
-      "family": "Approach",
-      "source": "/fonts/Approach-Regular.woff2",
-      "format": "woff2",
+      "family": "Inter",
       "weight": 400
     }
   },
@@ -243,6 +239,7 @@
             "icon": "microchip",
             "pages": [
               "docs/hardware-platforms/overview",
+              "docs/hardware-platforms/nvidia-gpus",
               "docs/hardware-platforms/amd-gpus",
               {
                 "group": "Ascend NPUs",
