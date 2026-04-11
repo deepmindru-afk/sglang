@@ -102,22 +102,6 @@ Important caveat:
 - "often" does not mean "always"
 - the exact load path still depends on the checkpoint family, especially whether a model uses a packed-QKV layout
 
-## FLUX.1-dev NVFP4 Bring-Up Notes
-
-The validated FLUX.1-dev SGLang-side NVFP4 path used all of the following:
-
-- keep `torch.compile` disabled for smoke, correctness, benchmark, and profiler runs when the task requires it
-- load the mixed checkpoint with `--transformer-path <mixed-transformer-dir>`, not `--transformer-weights-path`
-- prefer `--prompt-path <file>` when pairing a fixed prompt with `--output-file-name`
-- if the base FLUX repo is already cached locally and the machine has unreliable HF access, point `--model-path` at the local snapshot and set `HF_HUB_OFFLINE=1`
-
-For this FLUX.1-dev export family, two concrete pitfalls were validated:
-
-- the diffusers NVFP4 export already matched the runtime kernel byte layout, so `swap_weight_nibbles` must be `false`
-- `FluxAttention` and `FluxSingleTransformerBlock` must propagate full prefixes to their child linears, or the FLUX.1 BF16 fallback patterns do not match the intended modules
-
-Without those prefixes, the mixed checkpoint can fail with shape mismatches such as BF16 `(12288, 3072)` tensors being loaded into NVFP4 `(12288, 1536)` parameters.
-
 ## Generic Workflow
 
 ### 1. Verify The BF16 Baseline First

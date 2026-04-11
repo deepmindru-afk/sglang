@@ -25,21 +25,6 @@ Before running any benchmark, profiler, or kernel-validation command:
 - export `FLASHINFER_DISABLE_VERSION_CHECK=1`
 - choose idle GPU(s) before starting perf work
 
-## Native Backend Gate
-
-All diffusion benchmark and profiling results owned by this skill must come from the native SGLang diffusion backend.
-
-Treat any of the following as a hard stop condition:
-- `Falling back to diffusers backend`
-- `Using diffusers backend`
-- `Loaded diffusers pipeline`
-
-If any benchmark, perf-dump, or `torch.profiler` command prints one of those signals:
-- stop the workflow immediately
-- do not keep the generated numbers or traces as SGLang benchmark evidence
-- do not continue to hotspot classification or kernel work
-- first fix model resolution, pipeline selection, overlay/materialization, or other backend-selection issues so the model runs on the native SGLang diffusion path
-
 ## Main Reference
 
 - [benchmark-and-profile.md](benchmark-and-profile.md) — canonical denoise benchmark, perf dump, and `torch.profiler` workflow; uses the checked-in nightly-aligned presets, including `LTX-2` two-stage
@@ -60,15 +45,3 @@ Always rule out these existing families first:
 - turbo-layer async all-to-all overlap
 - `torch.compile` compute / communication reorder
 - dual-stream diffusion execution
-
-If the user explicitly requires `torch.compile` to stay off, do not use the
-default benchmark preset invocation unchanged. Either pass the checked-in
-benchmark helper its no-compile switch or run the equivalent manual command
-without `--enable-torch-compile`.
-
-For FLUX-family manual profiling runs with a quantized transformer override:
-- use `sglang generate` directly
-- pass the override as `--transformer-path <dir>`
-- prefer `--prompt-path <file>` when also fixing `--output-file-name`
-- if the base model is already cached locally and the machine has unreliable HF access, use the local cached `--model-path` plus `HF_HUB_OFFLINE=1`
-- remember that `--profile` changes latency substantially; use the non-profile perf dump for the real before/after benchmark claim

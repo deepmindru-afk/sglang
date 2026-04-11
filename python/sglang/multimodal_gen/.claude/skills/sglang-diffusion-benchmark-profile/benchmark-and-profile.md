@@ -224,29 +224,6 @@ sglang generate \
   --profile
 ```
 
-For FLUX-family quantized override bring-up, prefer the concrete pattern below:
-
-```bash
-HF_HUB_OFFLINE=1 \
-SGLANG_TORCH_PROFILER_DIR="${PROFILE_DIR}/torch" \
-sglang generate \
-  --model-path=/path/to/local/black-forest-labs--FLUX.1-dev \
-  --transformer-path /path/to/transformer_mixed \
-  --prompt-path /tmp/flux_prompt.txt \
-  --width=1024 --height=1024 --num-inference-steps=50 \
-  --seed=42 --num-gpus=4 \
-  --dit-layerwise-offload=true \
-  --dit-offload-prefetch-size=0.0 \
-  --vae-cpu-offload=true --vae-tiling=true \
-  --enable-torch-compile=false \
-  --warmup=true --profile --num-profiled-timesteps=5
-```
-
-Notes:
-- use `--transformer-path`, not `--transformer-weights-path`, for the mixed SGLang transformer override
-- use `--prompt-path` when pairing a fixed prompt with `--output-file-name`
-- do not use the profiled run itself as the primary latency claim; profiler overhead is expected
-
 Use `--profile-all-stages` only when you really need text encoder, VAE, or
 other non-denoise stages too.
 
