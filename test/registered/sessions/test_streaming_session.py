@@ -621,7 +621,6 @@ class TestStreamingSessionMixedChunk(TestStreamingSession):
         kill_process_tree(cls.process.pid)
 
 
-@unittest.skip("streaming session + retract has a token leak — tracked separately")
 class TestStreamingSessionRetract(TestStreamingSession):
     """Streaming session under retract decode pressure."""
 
@@ -649,7 +648,6 @@ class TestStreamingSessionRetract(TestStreamingSession):
         kill_process_tree(cls.process.pid)
 
 
-@unittest.skip("streaming session + retract has a token leak — tracked separately")
 class TestStreamingSessionRetractMixedChunk(TestStreamingSession):
     """Streaming session under retract decode with --enable-mixed-chunk."""
 
