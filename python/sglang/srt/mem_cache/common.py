@@ -507,7 +507,22 @@ def release_kv_cache(req: Req, tree_cache: BasePrefixCache, is_insert: bool = Tr
             tree_cache.token_to_kv_pool_allocator.free(indices_to_free)
         req.kv_allocated_len = req.kv_committed_len
 
+    _dbg_avail_before = tree_cache.token_to_kv_pool_allocator.available_size()
+    _dbg_evict_before = tree_cache.evictable_size()
+    _dbg_prot_before = tree_cache.protected_size()
     tree_cache.cache_finished_req(req, is_insert=is_insert)
+    _dbg_avail_after = tree_cache.token_to_kv_pool_allocator.available_size()
+    _dbg_evict_after = tree_cache.evictable_size()
+    _dbg_prot_after = tree_cache.protected_size()
+    logger.warning(
+        f"[DBG finish] rid={req.rid[:8]} session={req.session is not None} "
+        f"stream={req.session is not None and req.session.streaming} "
+        f"alloc={req.kv_allocated_len} committed={req.kv_committed_len} "
+        f"protected={req.cache_protected_len} pool_idx={req.req_pool_idx} "
+        f"avail:{_dbg_avail_before}->{_dbg_avail_after} "
+        f"evict:{_dbg_evict_before}->{_dbg_evict_after} "
+        f"prot:{_dbg_prot_before}->{_dbg_prot_after}"
+    )
 
     # SessionAwareCache.cache_finished_req sets req_pool_idx = None to transfer
     # KV ownership to the SessionSlot, so the remaining cleanup is skipped.
