@@ -374,7 +374,16 @@ class SchedulerRuntimeCheckerMixin:
                     allocated_len = ceil_align(allocated_len, self.page_size)
                     assert req.cache_protected_len % self.page_size == 0
 
-                full_uncached += allocated_len - req.cache_protected_len
+                contrib = allocated_len - req.cache_protected_len
+                if contrib < 0:
+                    logger.warning(
+                        f"[DBG neg_uncached] rid={req.rid[:8]} alloc={req.kv_allocated_len} "
+                        f"aligned={allocated_len} protected={req.cache_protected_len} "
+                        f"committed={req.kv_committed_len} contrib={contrib} "
+                        f"to_finish={req.to_finish} finished_reason={req.finished_reason} "
+                        f"is_retracted={req.is_retracted} session={req.session}"
+                    )
+                full_uncached += contrib
                 if self.is_hybrid_swa:
                     swa_uncached += allocated_len - max(
                         req.cache_protected_len, req.swa_evicted_seqlen

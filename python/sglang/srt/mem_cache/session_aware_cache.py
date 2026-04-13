@@ -199,7 +199,15 @@ class SessionAwareCache(BasePrefixCache):
         # restore, the request gets a fresh pool slot from alloc_for_extend
         # and the session slot remains untouched.
         if req.to_finish is not None:
-            return self.inner.match_prefix(params)
+            result = self.inner.match_prefix(params)
+            logger.warning(
+                f"[DBG abort_match] rid={req.rid[:8]} sid={req.session.session_id[:8]} "
+                f"token_ids_len={len(params.key.token_ids)} "
+                f"matched={len(result.device_indices)} "
+                f"match_protected={result.cache_protected_len} "
+                f"to_finish={req.to_finish}"
+            )
+            return result
 
         slot.restore_to_req(req)
 
@@ -230,11 +238,18 @@ class SessionAwareCache(BasePrefixCache):
             req.req_pool_idx, :prefix_len
         ].to(dtype=torch.int64)
 
+        # Clamp cache_protected_len to match device_indices length. If the
+        # user's new prompt is shorter than the session's cached prefix
+        # (shrink scenario, e.g. after an abort), prefix_len < slot's full
+        # protected length and returning slot.cache_protected_len unchanged
+        # would break the req.kv_allocated_len >= req.cache_protected_len
+        # invariant in downstream accounting. The slot's underlying lock
+        # length is preserved via slot.cache_protected_len for release.
         return MatchResult(
             device_indices=device_indices,
             last_device_node=slot.virtual_node,
             last_host_node=slot.virtual_node,
-            cache_protected_len=slot.cache_protected_len,
+            cache_protected_len=min(slot.cache_protected_len, prefix_len),
         )
 
     def cache_finished_req(self, req: Req, is_insert: bool = True, **kwargs):
@@ -252,6 +267,13 @@ class SessionAwareCache(BasePrefixCache):
         # request got a fresh pool slot from alloc_for_extend.  Don't
         # overwrite the session slot -- free the transient KV and pool slot.
         if not is_first and isinstance(req.finished_reason, FINISH_ABORT):
+            logger.warning(
+                f"[DBG abort_finish] rid={req.rid[:8]} sid={session_id[:8]} "
+                f"alloc={req.kv_allocated_len} committed={req.kv_committed_len} "
+                f"protected={req.cache_protected_len} pool_idx={req.req_pool_idx} "
+                f"slot_alloc={slot.kv_allocated_len} slot_committed={slot.kv_committed_len} "
+                f"slot_protected={slot.cache_protected_len}"
+            )
             if req.req_pool_idx is not None:
                 # Free all KV pages allocated for this aborted request.
                 end = req.kv_allocated_len
