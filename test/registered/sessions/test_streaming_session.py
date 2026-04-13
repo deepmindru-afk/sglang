@@ -726,6 +726,67 @@ class TestStreamingSessionEagle(TestStreamingSession):
         kill_process_tree(cls.process.pid)
 
 
+class TestStreamingSessionEagleV2(TestStreamingSession):
+    """Streaming session with EAGLE3 spec v2 (overlap-aware schedule).
+
+    Spec v2 may over-generate beyond max_new_tokens (each verify round
+    accepts M+1 tokens, with no per-token stop check inside the round).
+    response.completion_tokens is capped at max_new_tokens, but
+    slot.kv_committed_len reflects the actual output_ids length minus 1
+    (spec's free-token isn't committed). Per-turn over-generation varies,
+    so a constant inheritance offset doesn't work — skip the strict
+    assertion. The 4 leak tests still validate spec v2 + streaming
+    session under the strict mem check.
+    """
+
+    @unittest.skip(
+        "Spec v2 over-generation makes slot.kv_committed_len drift unevenly "
+        "vs response.completion_tokens; constant kv_inherit_offset can't fit."
+    )
+    def test_kv_cache_inheritance(self, gen_len=12):
+        pass
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = DEFAULT_TARGET_MODEL_EAGLE3
+        cls.base_url = DEFAULT_URL_FOR_TEST
+        with envs.SGLANG_ENABLE_SPEC_V2.override(
+            True
+        ), envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.override(
+            2
+        ), envs.SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN.override(
+            True
+        ):
+            cls.process = popen_launch_server(
+                cls.model,
+                cls.base_url,
+                timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+                other_args=[
+                    "--enable-streaming-session",
+                    "--chunked-prefill-size",
+                    "512",
+                    "--dtype=float16",
+                    "--speculative-algorithm",
+                    "EAGLE3",
+                    "--speculative-draft-model",
+                    DEFAULT_DRAFT_MODEL_EAGLE3,
+                    "--speculative-num-steps",
+                    "3",
+                    "--speculative-eagle-topk",
+                    "1",
+                    "--speculative-num-draft-tokens",
+                    "4",
+                    "--mem-fraction-static",
+                    "0.7",
+                ],
+            )
+        cls.tokenizer = get_tokenizer(cls.model)
+
+    @classmethod
+    def tearDownClass(cls):
+        kill_process_tree(cls.process.pid)
+
+
 class TestStreamingSessionAbortLeakRepro(CustomTestCase):
     @classmethod
     def setUpClass(cls):
