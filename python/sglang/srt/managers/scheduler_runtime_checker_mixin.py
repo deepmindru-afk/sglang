@@ -352,6 +352,9 @@ class SchedulerRuntimeCheckerMixin:
             for req in batch.reqs:
                 assert req.kv_committed_freed == req.kv_overallocated_freed
                 if req.kv_committed_freed or req.req_pool_idx is None:
+                    logger.info(
+                        f"[DBG uncached] skip rid={req.rid[:8]} committed_freed={req.kv_committed_freed} pool_idx={req.req_pool_idx} alloc={req.kv_allocated_len} committed={req.kv_committed_len} protected={req.cache_protected_len}"
+                    )
                     continue
 
                 allocated_len = req.kv_allocated_len
@@ -359,7 +362,11 @@ class SchedulerRuntimeCheckerMixin:
                     allocated_len = ceil_align(allocated_len, self.page_size)
                     assert req.cache_protected_len % self.page_size == 0
 
-                full_uncached += allocated_len - req.cache_protected_len
+                contrib = allocated_len - req.cache_protected_len
+                logger.info(
+                    f"[DBG uncached] rid={req.rid[:8]} alloc={req.kv_allocated_len} committed={req.kv_committed_len} protected={req.cache_protected_len} contrib={contrib} retracted={req.is_retracted}"
+                )
+                full_uncached += contrib
                 if self.is_hybrid_swa:
                     swa_uncached += allocated_len - max(
                         req.cache_protected_len, req.swa_evicted_seqlen

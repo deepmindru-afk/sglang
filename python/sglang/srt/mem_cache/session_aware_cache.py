@@ -416,7 +416,10 @@ class SessionAwareCache(BasePrefixCache):
         the running request's uncached_size in the busy mem check.
         """
         total = 0
-        for slot in self.slots.values():
+        for sid, slot in self.slots.items():
+            logger.info(
+                f"[DBG slot] sid={sid[:8]} is_holding_kv={slot.is_holding_kv} is_active={slot.is_active} alloc={slot.kv_allocated_len} committed={slot.kv_committed_len} protected={slot.cache_protected_len} pool_idx={slot.req_pool_idx}"
+            )
             if slot.is_holding_kv and not slot.is_active:
                 allocated = ceil_align(slot.kv_allocated_len, self.page_size)
                 total += allocated - slot.cache_protected_len
