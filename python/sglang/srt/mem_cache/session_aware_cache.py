@@ -207,6 +207,9 @@ class SessionAwareCache(BasePrefixCache):
         # (in Req.init_next_round_input), so the prefix key is not truncated
         # and we can directly reuse the committed KV length.
         prefix_len = min(req.kv_committed_len, max(len(params.key.token_ids) - 1, 0))
+        logger.info(
+            f"[DBG match_prefix] rid={req.rid[:8]} slot_committed={slot.kv_committed_len} slot_alloc={slot.kv_allocated_len} slot_protected={slot.cache_protected_len} token_ids_len={len(params.key.token_ids)} prefix_len={prefix_len} is_retracted={req.is_retracted}"
+        )
         device_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, :prefix_len
         ].to(dtype=torch.int64)

@@ -211,7 +211,12 @@ def alloc_token_slots(
     if backup_state:
         state = allocator.backup_state()
 
+    before_available = allocator.available_size()
     out_cache_loc = allocator.alloc(num_tokens)
+    after_available = allocator.available_size()
+    logger.info(
+        f"[DBG alloc_token] num_tokens={num_tokens} available_before={before_available} available_after={after_available} delta={after_available - before_available}"
+    )
 
     if out_cache_loc is None:
         error_msg = (
