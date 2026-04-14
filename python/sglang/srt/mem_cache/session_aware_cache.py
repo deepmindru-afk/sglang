@@ -183,13 +183,8 @@ class SessionAwareCache(BasePrefixCache):
         if slot is None or slot.req_pool_idx is None:
             return self.inner.match_prefix(params)
 
-        # If the request is destined for abort (e.g. input too long),
-        # do NOT restore the slot's KV state.  set_finish_with_abort
-        # truncates origin_input_ids to [0], so alloc_for_extend would
-        # overwrite the slot's req_to_token row with a 1-token prefix,
-        # destroying the session's accumulated KV mapping.  By skipping
-        # restore, the request gets a fresh pool slot from alloc_for_extend
-        # and the session slot remains untouched.
+        # Pre-aborted req: skip slot restore so alloc_for_extend gets a
+        # fresh pool slot and the session's KV mapping stays intact.
         if req.to_finish is not None:
             return self.inner.match_prefix(params)
 
