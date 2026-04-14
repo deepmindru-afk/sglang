@@ -130,9 +130,9 @@ class Session:
                 abort_message = "Streaming sessions do not support offset."
             elif self.req_nodes:
                 assert len(self.req_nodes) == 1
-                # Peek, don't pop. req_nodes is updated only in commit_req
-                # after the scheduler confirms the request is valid.
-                last_req_node = next(iter(self.req_nodes.values()))
+                # Peek (don't pop) the single req_node. req_nodes is updated
+                # only in commit_req after the scheduler validates the request.
+                [last_req_node] = self.req_nodes.values()
                 last_req = last_req_node.req
         elif session_params.replace:
             if session_params.rid is None:
@@ -257,7 +257,7 @@ class Session:
         If the request is aborted before commit, req_nodes stays unchanged.
         """
         if self.req_nodes:
-            prev_node = next(iter(self.req_nodes.values()))
+            [prev_node] = self.req_nodes.values()
             prev_node.req.session = None
             self.req_nodes.clear()
         self.req_nodes[new_req.rid] = SessionReqNode(new_req)

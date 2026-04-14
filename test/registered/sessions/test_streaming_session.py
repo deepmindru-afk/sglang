@@ -645,6 +645,104 @@ class TestStreamingSession(CustomTestCase):
             "likely a token leak from retract/mixed-chunk + streaming session.",
         )
 
+    def test_mid_processing_abort_preserves_session(self) -> None:
+        """Abort a running streaming session request via the abort API and
+        verify the session slot is preserved for the next turn."""
+        requests.post(self.base_url + "/flush_cache")
+
+        # Open session
+        resp = requests.post(
+            self.base_url + "/open_session",
+            json={"capacity_of_str_len": 50000, "streaming": True},
+        )
+        self.assertEqual(resp.status_code, 200)
+        session_id = resp.json()
+
+        try:
+            # Turn 1: normal generate to create slot
+            ids_1 = self.tokenizer.encode("Tell me a very long story about a wizard.")
+            resp_1 = requests.post(
+                self.base_url + "/generate",
+                json={
+                    "input_ids": ids_1,
+                    "sampling_params": {
+                        "temperature": 0,
+                        "max_new_tokens": 16,
+                    },
+                    "session_params": {"id": session_id, "rid": None},
+                },
+                timeout=30,
+            )
+            self.assertEqual(resp_1.status_code, 200, resp_1.text)
+            data_1 = resp_1.json()
+            rid_1 = data_1["meta_info"]["id"]
+
+            # Turn 2: start a long generate, then abort mid-decode
+            ids_2 = self.tokenizer.encode(" Continue the story in great detail.")
+
+            import threading
+
+            result = [None]
+
+            def do_generate():
+                r = requests.post(
+                    self.base_url + "/generate",
+                    json={
+                        "input_ids": ids_2,
+                        "sampling_params": {
+                            "temperature": 0,
+                            "max_new_tokens": 256,
+                        },
+                        "session_params": {"id": session_id, "rid": None},
+                    },
+                    timeout=60,
+                )
+                result[0] = r
+
+            t = threading.Thread(target=do_generate)
+            t.start()
+
+            # Wait a bit for decode to start, then abort
+            time.sleep(2)
+            abort_resp = requests.post(
+                self.base_url + "/abort",
+                json={"rid": None, "abort_all": False},
+                timeout=10,
+            )
+
+            t.join(timeout=30)
+
+            # Turn 3: recovery — session should still work
+            ids_3 = self.tokenizer.encode(" What happens next?")
+            resp_3 = requests.post(
+                self.base_url + "/generate",
+                json={
+                    "input_ids": ids_3,
+                    "sampling_params": {
+                        "temperature": 0,
+                        "max_new_tokens": 8,
+                    },
+                    "session_params": {"id": session_id, "rid": None},
+                },
+                timeout=30,
+            )
+            self.assertEqual(resp_3.status_code, 200, resp_3.text)
+            data_3 = resp_3.json()
+            self.assertGreater(
+                data_3["meta_info"]["cached_tokens"],
+                0,
+                "Recovery after mid-processing abort should inherit KV",
+            )
+        finally:
+            requests.post(
+                self.base_url + "/close_session",
+                json={"session_id": session_id},
+            )
+
+        # Server should still be healthy
+        health = requests.get(self.base_url + "/health", timeout=10)
+        self.assertEqual(health.status_code, 200)
+
 
 class TestStreamingSessionMixedChunk(TestStreamingSession):
     """Streaming session with --enable-mixed-chunk."""
