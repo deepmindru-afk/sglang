@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from typing import TYPE_CHECKING, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Optional
 
 from sglang.srt.managers.io_struct import (
     CloseSessionReqInput,
@@ -94,8 +94,6 @@ class Session:
         self.last_active_time: float = time.monotonic()
         self.req_nodes: Dict[str, SessionReqNode] = {}
         self.close_on_finish: bool = False
-        # Saved by create_req for rollback if the new request is aborted.
-        self._prev_req_node: Optional[Tuple[str, SessionReqNode]] = None
 
     def is_timed_out(self) -> bool:
         if self.timeout is None:
@@ -132,9 +130,10 @@ class Session:
                 abort_message = "Streaming sessions do not support offset."
             elif self.req_nodes:
                 assert len(self.req_nodes) == 1
-                last_rid, last_req_node = self.req_nodes.popitem()
+                # Peek, don't pop. req_nodes is updated only in commit_req
+                # after the scheduler confirms the request is valid.
+                last_req_node = next(iter(self.req_nodes.values()))
                 last_req = last_req_node.req
-                self._prev_req_node = (last_rid, last_req_node)
         elif session_params.replace:
             if session_params.rid is None:
                 for _, req_node in self.req_nodes.items():
@@ -242,28 +241,26 @@ class Session:
 
         if abort:
             new_req.set_finish_with_abort(abort_message)
-        elif self.streaming:
-            if last_req is not None:
-                last_req.session = None
-            self.req_nodes[req.rid] = SessionReqNode(new_req)
-        else:
+        elif not self.streaming:
             new_req_node = SessionReqNode(new_req, last_req_node)
             self.req_nodes[req.rid] = new_req_node
+        # Streaming sessions: req_nodes is NOT updated here.
+        # The scheduler calls commit_req() after validation passes.
 
         return new_req
 
-    def rollback_aborted_req(self, rid: str):
-        """Undo create_req for an aborted request.
+    def commit_req(self, new_req):
+        """Commit a validated streaming request into req_nodes.
 
-        Removes the aborted req from req_nodes and restores the previous
-        successful req, maintaining append-only semantics for streaming
-        sessions.
+        Called by the scheduler after all validation passes. Replaces the
+        previous req_node with the new one, maintaining append-only semantics.
+        If the request is aborted before commit, req_nodes stays unchanged.
         """
-        self.req_nodes.pop(rid, None)
-        if self._prev_req_node is not None:
-            prev_rid, prev_node = self._prev_req_node
-            self.req_nodes[prev_rid] = prev_node
-            self._prev_req_node = None
+        if self.req_nodes:
+            prev_node = next(iter(self.req_nodes.values()))
+            prev_node.req.session = None
+            self.req_nodes.clear()
+        self.req_nodes[new_req.rid] = SessionReqNode(new_req)
 
 
 class SessionController:
