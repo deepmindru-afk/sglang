@@ -566,9 +566,7 @@ def _average(data: list[float]) -> Optional[float]:
     return sum(data) / len(data)
 
 
-def _queue_time_seconds(
-    job: dict, report_time: datetime = None
-) -> Optional[float]:
+def _queue_time_seconds(job: dict, report_time: datetime = None) -> Optional[float]:
     """Extract queue time in seconds for a job.
 
     * Has ``runner_name`` (picked up by a runner): ``started_at - created_at``.
@@ -722,9 +720,7 @@ def analyze_concurrency(jobs: list[dict], report_time: datetime = None) -> dict:
     return results
 
 
-def analyze_busy_periods(
-    jobs: list[dict], report_time: datetime = None
-) -> list[dict]:
+def analyze_busy_periods(jobs: list[dict], report_time: datetime = None) -> list[dict]:
     """Analyze job activity by hour of day (UTC).
 
     Buckets jobs by the UTC hour they started (or were created, for
@@ -791,9 +787,7 @@ def analyze_busy_periods(
     return results
 
 
-def analyze_queue_distribution(
-    jobs: list[dict], report_time: datetime = None
-) -> dict:
+def analyze_queue_distribution(jobs: list[dict], report_time: datetime = None) -> dict:
     """Analyze queue time distribution per runner label."""
     queue_times_by_label: dict[str, list[float]] = {}
     for job in jobs:
@@ -865,7 +859,8 @@ def analyze_utilization_snapshots(
         window_start = report_time - timedelta(hours=24)
         window_start = window_start.replace(
             minute=(window_start.minute // interval_minutes) * interval_minutes,
-            second=0, microsecond=0,
+            second=0,
+            microsecond=0,
         )
 
         snapshot_data: list[dict] = []
@@ -875,11 +870,13 @@ def analyze_utilization_snapshots(
             queued = _count_at_time(sorted_queued, t)
 
             if running > 0 or queued > 0:
-                snapshot_data.append({
-                    "time": t.strftime("%m-%d %H:%M"),
-                    "running": running,
-                    "queued": queued,
-                })
+                snapshot_data.append(
+                    {
+                        "time": t.strftime("%m-%d %H:%M"),
+                        "running": running,
+                        "queued": queued,
+                    }
+                )
             t += timedelta(minutes=interval_minutes)
 
         if snapshot_data:
@@ -984,8 +981,7 @@ def process_results(
         processed = r.copy()
         processed["created_formatted"] = format_time(r["created_at"])
         processed["started_formatted"] = format_time(r["started_at"])
-        processed["queue_time"] = calculate_queue_time(r, report_time
-        )
+        processed["queue_time"] = calculate_queue_time(r, report_time)
         processed["duration"] = calculate_duration(r["started_at"], r["completed_at"])
         # Use the job's html_url for direct link to the specific job
         processed["url"] = (
@@ -1611,9 +1607,7 @@ def format_runner_report_markdown(
             lines.append("| Time (UTC) | Running | Queued |")
             lines.append("|-----------|---------|--------|")
             for s in snapshots:
-                lines.append(
-                    f"| {s['time']} | **{s['running']}** | {s['queued']} |"
-                )
+                lines.append(f"| {s['time']} | **{s['running']}** | {s['queued']} |")
             lines.append("")
 
     # --- Queue Time Distribution ---
@@ -1825,7 +1819,9 @@ def main():
         if fetch_metadata is None:
             fetch_metadata = {}
         if "jobs_excluded_no_label" not in fetch_metadata:
-            fetch_metadata["jobs_excluded_no_label"] = len(all_snapshot_jobs) - len(jobs)
+            fetch_metadata["jobs_excluded_no_label"] = len(all_snapshot_jobs) - len(
+                jobs
+            )
 
         md_content = format_runner_report_markdown(
             jobs,
