@@ -259,18 +259,44 @@ class SessionAwareCache(BasePrefixCache):
                 self.token_to_kv_pool_allocator.free(kv_indices)
                 self.req_to_token_pool.free_slots.append(req.req_pool_idx)
                 req.req_pool_idx = None
+            self._mark_kv_freed(req)
             return
 
         if is_first:
             slot = SessionSlot()
             self.slots[session_id] = slot
 
-        # Streaming sessions are append-only: kv_committed only grows.
-        # The shrink guard is no longer needed after the rollback fix
-        # in session_controller ensures req_nodes always points to the
-        # last successful request.
+        # Trim speculative tail before transferring KV to the slot.
+        # Speculative decoding over-allocates draft token slots; free
+        # the range [committed, allocated) so the slot only inherits
+        # committed KV.
+        self._trim_speculative_tail(req)
 
         slot.save_from_req(req, is_first=is_first)
+
+        # Mark bookkeeping flags so the busy check doesn't count this
+        # finished request as uncached KV.
+        self._mark_kv_freed(req)
+
+    def _trim_speculative_tail(self, req: Req):
+        """Free over-allocated KV slots from speculative decoding."""
+        start_p, end_p = req.pop_overallocated_kv_cache()
+        if self.page_size > 1:
+            start_p = ceil_align(start_p, self.page_size)
+        if start_p < end_p:
+            indices = self.req_to_token_pool.req_to_token[req.req_pool_idx][
+                start_p:end_p
+            ]
+            self.token_to_kv_pool_allocator.free(indices)
+        req.kv_allocated_len = req.kv_committed_len
+
+    @staticmethod
+    def _mark_kv_freed(req: Req):
+        """Set bookkeeping flags so busy check skips this finished req."""
+        if not req.kv_committed_freed:
+            req.pop_committed_kv_cache()
+        if not req.kv_overallocated_freed:
+            req.pop_overallocated_kv_cache()
 
     def cache_unfinished_req(self, req: Req, **kwargs):
         if _is_streaming(req):
