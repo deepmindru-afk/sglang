@@ -35,11 +35,8 @@ from sglang.test.test_utils import (
 register_cuda_ci(est_time=67, suite="stage-b-test-1-gpu-large")
 
 # ---------------------------------------------------------------------------
-# Logprob leak constants
+# Logprob prompts (shared by concurrent logprob test)
 # ---------------------------------------------------------------------------
-
-LOGPROB_NUM_TURNS = 5
-LOGPROB_NUM_ROUNDS = 30
 
 LOGPROB_PROMPTS = [
     "The quick brown fox jumps over the lazy dog.",
@@ -50,14 +47,9 @@ LOGPROB_PROMPTS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Chunked prefill leak constants
+# Filler text to trigger chunked prefill (200+ tokens per turn)
 # ---------------------------------------------------------------------------
 
-LEAK_NUM_SESSIONS = 4
-LEAK_NUM_TURNS = 5
-LEAK_GEN_LEN = 16
-
-# Filler text to trigger chunked prefill (200+ tokens per turn)
 LEAK_FILLER = (
     "The quick brown fox jumps over the lazy dog. "
     "Pack my box with five dozen liquor jugs. "
@@ -84,144 +76,22 @@ ABORT_REPRO_ABORT_TOKENS = 320
 ABORT_REPRO_NON_STREAMING_TOKENS = 96
 ABORT_REPRO_CHUNKED_PREFILL_SIZE = 128
 
-
 # ---------------------------------------------------------------------------
-# Logprob leak helpers
-# ---------------------------------------------------------------------------
-
-
-def _logprob_generate(base_url, input_ids, **kwargs) -> dict:
-    payload: dict[str, Any] = {
-        "input_ids": input_ids,
-        "sampling_params": {
-            "temperature": 0,
-            "max_new_tokens": kwargs.get("max_new_tokens", 8),
-            "no_stop_trim": True,
-            "skip_special_tokens": False,
-        },
-    }
-    if kwargs.get("return_logprob"):
-        payload["return_logprob"] = True
-    if kwargs.get("logprob_start_len") is not None:
-        payload["logprob_start_len"] = kwargs["logprob_start_len"]
-    if kwargs.get("session_params"):
-        payload["session_params"] = kwargs["session_params"]
-    resp = requests.post(base_url + "/generate", json=payload, timeout=120)
-    assert resp.status_code == 200, f"Generate failed: {resp.text}"
-    return resp.json()
-
-
-def _logprob_run_one_session(base_url, tokenizer, **gen_kwargs):
-    """Open session -> N turns -> close."""
-    resp = requests.post(
-        base_url + "/open_session",
-        json={"capacity_of_str_len": 50000, "streaming": True},
-    )
-    assert resp.status_code == 200
-    session_id = resp.json()
-
-    rid = None
-    for turn in range(LOGPROB_NUM_TURNS):
-        turn_ids = tokenizer.encode(
-            f"Turn {turn}: {LOGPROB_PROMPTS[turn % len(LOGPROB_PROMPTS)]}"
-        )
-        result = _logprob_generate(
-            base_url,
-            turn_ids,
-            session_params={"id": session_id, "rid": rid},
-            **gen_kwargs,
-        )
-        rid = result["meta_info"]["id"]
-
-    requests.post(base_url + "/close_session", json={"session_id": session_id})
-
-
-def _logprob_assert_no_leak(base_url, tokenizer, **gen_kwargs):
-    """Run many session rounds and verify server stays healthy."""
-    requests.post(base_url + "/flush_cache")
-    for _ in range(LOGPROB_NUM_ROUNDS):
-        _logprob_run_one_session(base_url, tokenizer, **gen_kwargs)
-    time.sleep(3)
-    assert (
-        requests.get(base_url + "/health").status_code == 200
-    ), "Server unhealthy — likely a token memory leak."
-
-
-# ---------------------------------------------------------------------------
-# Chunked prefill leak helpers
+# Concurrent logprob constants (multi-session, tests retract under concurrency)
 # ---------------------------------------------------------------------------
 
+CONCURRENT_LOGPROB_SESSIONS = 6
+CONCURRENT_LOGPROB_TURNS = 5
+CONCURRENT_LOGPROB_ROUNDS = 10
 
-async def _leak_async_generate(
-    base_url: str,
-    session: aiohttp.ClientSession,
-    input_ids: list[int],
-    session_params: Optional[dict[str, Any]] = None,
-) -> Any:
-    payload: dict[str, Any] = {
-        "input_ids": input_ids,
-        "sampling_params": {
-            "temperature": 0,
-            "max_new_tokens": LEAK_GEN_LEN,
-            "no_stop_trim": True,
-            "skip_special_tokens": False,
-        },
-    }
-    if session_params:
-        payload["session_params"] = session_params
-    timeout = aiohttp.ClientTimeout(total=300)
-    async with session.post(
-        base_url + "/generate", json=payload, timeout=timeout
-    ) as resp:
-        assert resp.status == 200, f"Generate failed: {await resp.text()}"
-        return await resp.json()
+# ---------------------------------------------------------------------------
+# Concurrent stress constants (high-concurrency streaming + non-streaming)
+# ---------------------------------------------------------------------------
 
-
-async def _leak_run_all(base_url: str, tokenizer: Any) -> None:
-    """Fire all requests per turn simultaneously to create mixed batches."""
-    timeout = aiohttp.ClientTimeout(total=300)
-    async with aiohttp.ClientSession(timeout=timeout) as http:
-        # Open all sessions
-        sids = []
-        for s in range(LEAK_NUM_SESSIONS):
-            async with http.post(
-                base_url + "/open_session",
-                json={"capacity_of_str_len": 50000, "streaming": True},
-            ) as resp:
-                sids.append(await resp.json())
-
-        # For each turn, fire ALL streaming + non-streaming requests at once
-        for turn in range(LEAK_NUM_TURNS):
-            tasks = []
-            # Streaming requests for all sessions
-            for s in range(LEAK_NUM_SESSIONS):
-                offset = (s * LEAK_NUM_TURNS + turn) * 200
-                text = f"Session {s} turn {turn}: {LEAK_FILLER[offset : offset + 1500]}"
-                ids = tokenizer.encode(text)
-                tasks.append(
-                    _leak_async_generate(
-                        base_url,
-                        http,
-                        ids,
-                        session_params={"id": sids[s], "rid": None},
-                    )
-                )
-
-            # Non-streaming requests interleaved
-            for ns in range(LEAK_NUM_SESSIONS // 2):
-                text = f"Non-streaming {ns} turn {turn}: {LEAK_FILLER[ns * 100 : ns * 100 + 500]}"
-                ids = tokenizer.encode(text)
-                tasks.append(_leak_async_generate(base_url, http, ids))
-
-            # Fire all at once — creates mixed batch of streaming + non-streaming
-            await asyncio.gather(*tasks)
-
-        # Close all sessions
-        for sid in sids:
-            async with http.post(
-                base_url + "/close_session", json={"session_id": sid}
-            ) as resp:
-                assert resp.status == 200
+STRESS_NUM_SESSIONS = 8
+STRESS_NUM_NON_STREAMING = 4
+STRESS_NUM_TURNS = 6
+STRESS_GEN_LEN = 16
 
 
 def _make_token_sized_ids(
@@ -404,6 +274,167 @@ async def _abort_repro_run_all(base_url: str, tokenizer: Any) -> None:
                     assert resp.status == 200, await resp.text()
 
 
+# ---------------------------------------------------------------------------
+# General async generate helper (used by concurrent logprob & stress tests)
+# ---------------------------------------------------------------------------
+
+
+async def _async_generate(
+    base_url: str,
+    session: aiohttp.ClientSession,
+    input_ids: list[int],
+    max_new_tokens: int = 8,
+    session_params: Optional[dict[str, Any]] = None,
+    return_logprob: bool = False,
+    logprob_start_len: Optional[int] = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "input_ids": input_ids,
+        "sampling_params": {
+            "temperature": 0,
+            "max_new_tokens": max_new_tokens,
+            "no_stop_trim": True,
+            "skip_special_tokens": False,
+        },
+    }
+    if session_params:
+        payload["session_params"] = session_params
+    if return_logprob:
+        payload["return_logprob"] = True
+    if logprob_start_len is not None:
+        payload["logprob_start_len"] = logprob_start_len
+    timeout = aiohttp.ClientTimeout(total=300)
+    async with session.post(
+        base_url + "/generate", json=payload, timeout=timeout
+    ) as resp:
+        assert resp.status == 200, f"Generate failed: {await resp.text()}"
+        return await resp.json()
+
+
+# ---------------------------------------------------------------------------
+# Concurrent logprob helpers
+# ---------------------------------------------------------------------------
+
+
+async def _concurrent_logprob_run(base_url: str, tokenizer: Any, **gen_kwargs) -> None:
+    """Run multiple sessions concurrently with logprob requests.
+
+    Each round opens N sessions, fires all sessions' requests per turn
+    simultaneously (so the running batch has N entries — retract can
+    actually kick one), then closes all sessions.
+    """
+    timeout = aiohttp.ClientTimeout(total=300)
+    async with aiohttp.ClientSession(timeout=timeout) as http:
+        for _ in range(CONCURRENT_LOGPROB_ROUNDS):
+            sids: list[str] = []
+            for _ in range(CONCURRENT_LOGPROB_SESSIONS):
+                async with http.post(
+                    base_url + "/open_session",
+                    json={"capacity_of_str_len": 50000, "streaming": True},
+                ) as resp:
+                    assert resp.status == 200
+                    sids.append(await resp.json())
+
+            rids: list[Optional[str]] = [None] * CONCURRENT_LOGPROB_SESSIONS
+            for turn in range(CONCURRENT_LOGPROB_TURNS):
+                tasks = []
+                for s in range(CONCURRENT_LOGPROB_SESSIONS):
+                    text = (
+                        f"S{s} T{turn}: "
+                        f"{LOGPROB_PROMPTS[turn % len(LOGPROB_PROMPTS)]}"
+                    )
+                    ids = tokenizer.encode(text)
+                    tasks.append(
+                        _async_generate(
+                            base_url,
+                            http,
+                            ids,
+                            session_params={"id": sids[s], "rid": rids[s]},
+                            **gen_kwargs,
+                        )
+                    )
+                results = await asyncio.gather(*tasks)
+                for s in range(CONCURRENT_LOGPROB_SESSIONS):
+                    rids[s] = results[s]["meta_info"]["id"]
+
+            for sid in sids:
+                async with http.post(
+                    base_url + "/close_session", json={"session_id": sid}
+                ) as resp:
+                    assert resp.status == 200
+
+
+# ---------------------------------------------------------------------------
+# Concurrent stress helpers
+# ---------------------------------------------------------------------------
+
+
+async def _stress_run_all(base_url: str, tokenizer: Any) -> None:
+    """High concurrency streaming + non-streaming in mixed batches.
+
+    Opens many sessions and fires all requests per turn simultaneously,
+    ensuring the running batch is large enough for retract to have real
+    effect. Prompt tokens are long enough (~200+) to trigger chunked
+    prefill, so retract can interrupt mid-extend.
+    """
+    timeout = aiohttp.ClientTimeout(total=300)
+    async with aiohttp.ClientSession(timeout=timeout) as http:
+        sids: list[str] = []
+        for _ in range(STRESS_NUM_SESSIONS):
+            async with http.post(
+                base_url + "/open_session",
+                json={"capacity_of_str_len": 50000, "streaming": True},
+            ) as resp:
+                assert resp.status == 200
+                sids.append(await resp.json())
+
+        rids: list[Optional[str]] = [None] * STRESS_NUM_SESSIONS
+        for turn in range(STRESS_NUM_TURNS):
+            tasks = []
+            # Streaming requests — long prompts to trigger chunked prefill
+            for s in range(STRESS_NUM_SESSIONS):
+                offset = (s * STRESS_NUM_TURNS + turn) * 200
+                text = (
+                    f"Session {s} turn {turn}: " f"{LEAK_FILLER[offset : offset + 800]}"
+                )
+                ids = tokenizer.encode(text)
+                tasks.append(
+                    _async_generate(
+                        base_url,
+                        http,
+                        ids,
+                        max_new_tokens=STRESS_GEN_LEN,
+                        session_params={"id": sids[s], "rid": rids[s]},
+                    )
+                )
+
+            # Non-streaming requests interleaved
+            for ns in range(STRESS_NUM_NON_STREAMING):
+                text = (
+                    f"Non-streaming {ns} turn {turn}: "
+                    f"{LEAK_FILLER[ns * 100 : ns * 100 + 400]}"
+                )
+                ids = tokenizer.encode(text)
+                tasks.append(
+                    _async_generate(
+                        base_url,
+                        http,
+                        ids,
+                        max_new_tokens=STRESS_GEN_LEN,
+                    )
+                )
+
+            results = await asyncio.gather(*tasks)
+            for s in range(STRESS_NUM_SESSIONS):
+                rids[s] = results[s]["meta_info"]["id"]
+
+        for sid in sids:
+            async with http.post(
+                base_url + "/close_session", json={"session_id": sid}
+            ) as resp:
+                assert resp.status == 200
+
+
 # ===================================================================
 # Test class
 # ===================================================================
@@ -551,32 +582,48 @@ class TestStreamingSession(CustomTestCase):
             "After session close + flush, cache should be fully reclaimed",
         )
 
-    def test_leak_logprob_none(self) -> None:
-        """Streaming sessions without logprobs must not leak tokens."""
-        _logprob_assert_no_leak(self.base_url, self.tokenizer)
+    def test_leak_logprob_concurrent(self) -> None:
+        """Concurrent multi-session logprob leak test (all 3 modes).
 
-    def test_leak_logprob_output(self) -> None:
-        """Streaming sessions with output logprobs must not leak tokens."""
-        _logprob_assert_no_leak(self.base_url, self.tokenizer, return_logprob=True)
-
-    def test_leak_logprob_input(self) -> None:
-        """Streaming sessions with logprob_start_len=0 must not leak tokens."""
-        _logprob_assert_no_leak(
-            self.base_url,
-            self.tokenizer,
-            return_logprob=True,
-            logprob_start_len=0,
-        )
-
-    def test_leak_chunked_prefill(self) -> None:
-        """Concurrent multi-turn streaming sessions then idle health check."""
+        6 sessions fire per turn simultaneously so the running batch has
+        real concurrency — retract/mixed-chunk actually exercise their
+        multi-request scheduling paths. Covers: output logprob,
+        input logprob (logprob_start_len=0), and no logprob.
+        """
         requests.post(self.base_url + "/flush_cache")
+        # Output logprob
+        asyncio.run(
+            _concurrent_logprob_run(self.base_url, self.tokenizer, return_logprob=True)
+        )
+        # Input logprob (logprob_start_len=0)
+        asyncio.run(
+            _concurrent_logprob_run(
+                self.base_url,
+                self.tokenizer,
+                return_logprob=True,
+                logprob_start_len=0,
+            )
+        )
+        # No logprob
+        asyncio.run(_concurrent_logprob_run(self.base_url, self.tokenizer))
+        time.sleep(3)
+        assert (
+            requests.get(self.base_url + "/health").status_code == 200
+        ), "Server unhealthy after concurrent logprob sessions."
 
-        asyncio.run(_leak_run_all(self.base_url, self.tokenizer))
+    def test_stress_concurrent_sessions(self) -> None:
+        """High concurrency streaming + non-streaming under mixed batch pressure.
 
-        # Run a few non-streaming requests to flush state
+        8 streaming sessions + 4 non-streaming per turn, with long prompts
+        triggering chunked prefill. Under retract, the scheduler retract_decode
+        fires every 3 forward steps and must correctly roll back streaming
+        session KV without leaking tokens.
+        """
+        requests.post(self.base_url + "/flush_cache")
+        asyncio.run(_stress_run_all(self.base_url, self.tokenizer))
+
         for i in range(3):
-            ids = self.tokenizer.encode(f"Flush request {i}: final cleanup.")
+            ids = self.tokenizer.encode(f"Post-stress cleanup {i}.")
             requests.post(
                 self.base_url + "/generate",
                 json={
@@ -585,14 +632,13 @@ class TestStreamingSession(CustomTestCase):
                 },
             )
 
-        # Wait for server to go idle and run memory check
         time.sleep(5)
         health = requests.get(self.base_url + "/health")
         self.assertEqual(
             health.status_code,
             200,
-            "Server unhealthy after streaming session close — "
-            "likely a token memory leak from streaming session lifecycle.",
+            "Server unhealthy after concurrent stress test — "
+            "likely a token leak from retract/mixed-chunk + streaming session.",
         )
 
 
@@ -765,6 +811,115 @@ class TestStreamingSessionEagleV2(TestStreamingSession):
                     "--enable-streaming-session",
                     "--chunked-prefill-size",
                     "512",
+                    "--dtype=float16",
+                    "--speculative-algorithm",
+                    "EAGLE3",
+                    "--speculative-draft-model",
+                    DEFAULT_DRAFT_MODEL_EAGLE3,
+                    "--speculative-num-steps",
+                    "3",
+                    "--speculative-eagle-topk",
+                    "1",
+                    "--speculative-num-draft-tokens",
+                    "4",
+                    "--mem-fraction-static",
+                    "0.7",
+                ],
+            )
+        cls.tokenizer = get_tokenizer(cls.model)
+
+    @classmethod
+    def tearDownClass(cls):
+        kill_process_tree(cls.process.pid)
+
+
+class TestStreamingSessionEagleRetract(TestStreamingSession):
+    """Streaming session with EAGLE3 speculative decoding under retract pressure.
+
+    Combines spec decode (which changes KV commit patterns) with retract
+    (which forces KV rollback mid-decode). --disable-overlap-schedule is
+    required for spec + streaming session.
+    """
+
+    kv_inherit_offset = -1
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = DEFAULT_TARGET_MODEL_EAGLE3
+        cls.base_url = DEFAULT_URL_FOR_TEST
+        with envs.SGLANG_TEST_RETRACT.override(
+            True
+        ), envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.override(
+            2
+        ), envs.SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN.override(
+            True
+        ):
+            cls.process = popen_launch_server(
+                cls.model,
+                cls.base_url,
+                timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+                other_args=[
+                    "--enable-streaming-session",
+                    "--disable-overlap-schedule",
+                    "--chunked-prefill-size",
+                    "128",
+                    "--dtype=float16",
+                    "--speculative-algorithm",
+                    "EAGLE3",
+                    "--speculative-draft-model",
+                    DEFAULT_DRAFT_MODEL_EAGLE3,
+                    "--speculative-num-steps",
+                    "3",
+                    "--speculative-eagle-topk",
+                    "1",
+                    "--speculative-num-draft-tokens",
+                    "4",
+                    "--mem-fraction-static",
+                    "0.7",
+                ],
+            )
+        cls.tokenizer = get_tokenizer(cls.model)
+
+    @classmethod
+    def tearDownClass(cls):
+        kill_process_tree(cls.process.pid)
+
+
+class TestStreamingSessionEagleV2Retract(TestStreamingSession):
+    """Streaming session with EAGLE3 spec v2 under retract pressure.
+
+    Same kv_inheritance skip as EagleV2 (over-generation drift), plus
+    retract forces KV rollback during verify rounds.
+    """
+
+    @unittest.skip(
+        "Spec v2 over-generation makes slot.kv_committed_len drift unevenly "
+        "vs response.completion_tokens; constant kv_inherit_offset can't fit."
+    )
+    def test_kv_cache_inheritance(self, gen_len=12):
+        pass
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = DEFAULT_TARGET_MODEL_EAGLE3
+        cls.base_url = DEFAULT_URL_FOR_TEST
+        with envs.SGLANG_ENABLE_SPEC_V2.override(
+            True
+        ), envs.SGLANG_TEST_RETRACT.override(
+            True
+        ), envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.override(
+            2
+        ), envs.SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN.override(
+            True
+        ):
+            cls.process = popen_launch_server(
+                cls.model,
+                cls.base_url,
+                timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+                other_args=[
+                    "--enable-streaming-session",
+                    "--chunked-prefill-size",
+                    "128",
                     "--dtype=float16",
                     "--speculative-algorithm",
                     "EAGLE3",
