@@ -234,21 +234,26 @@ class SessionAwareCache(BasePrefixCache):
         slot = self.slots.get(session_id)
         is_first = slot is None
 
-        # Aborted request: free the transient pool slot and don't touch
-        # the session slot. For first request abort, don't create a slot
-        # at all — the session stays empty for the next attempt.
+        # Aborted request handling depends on whether restore_to_req ran:
+        # - P1 skipped restore → req has a transient pool slot → free it
+        # - Mid-processing abort → req has the session slot → save it back
         if isinstance(req.finished_reason, FINISH_ABORT):
-            if req.req_pool_idx is not None:
-                end = req.kv_allocated_len
-                if end > 0:
-                    kv_indices = self.req_to_token_pool.req_to_token[
-                        req.req_pool_idx, :end
-                    ]
-                self.token_to_kv_pool_allocator.free(kv_indices)
-                self.req_to_token_pool.free_slots.append(req.req_pool_idx)
-                req.req_pool_idx = None
-            self._mark_kv_freed(req)
-            return
+            is_transient = slot is None or req.req_pool_idx != slot.req_pool_idx
+            if is_transient:
+                # Transient slot: free and don't create/touch session slot.
+                if req.req_pool_idx is not None:
+                    end = req.kv_allocated_len
+                    if end > 0:
+                        kv_indices = self.req_to_token_pool.req_to_token[
+                            req.req_pool_idx, :end
+                        ]
+                    self.token_to_kv_pool_allocator.free(kv_indices)
+                    self.req_to_token_pool.free_slots.append(req.req_pool_idx)
+                    req.req_pool_idx = None
+                self._mark_kv_freed(req)
+                return
+            # else: mid-processing abort with session slot — fall through
+            # to save_from_req so the session preserves committed KV.
 
         if is_first:
             slot = SessionSlot()
