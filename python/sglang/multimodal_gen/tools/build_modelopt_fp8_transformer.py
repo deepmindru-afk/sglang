@@ -29,7 +29,7 @@ import re
 import shutil
 from collections import defaultdict
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import torch
 from safetensors import safe_open
@@ -68,9 +68,9 @@ DEFAULT_LTX2_KEEP_BF16_PATTERNS = [
     r"^caption_projection\.linear_[12]$",
     r"^patchify_proj$",
     r"^proj_out$",
-    r"^transformer_blocks\.(0|43|44|45|46|47)\.(attn1|attn2|audio_attn1|audio_attn2|audio_to_video_attn|video_to_audio_attn)\.to_(q|k|v)$",
-    r"^transformer_blocks\.(0|43|44|45|46|47)\.(attn1|attn2|audio_attn1|audio_attn2|audio_to_video_attn|video_to_audio_attn)\.to_out\.0$",
-    r"^transformer_blocks\.(0|43|44|45|46|47)\.(ff|audio_ff)\.proj_(in|out)$",
+    r"^transformer_blocks\.(0|1|2|45|46|47)\.(attn1|attn2|audio_attn1|audio_attn2|audio_to_video_attn|video_to_audio_attn)\.to_(q|k|v)$",
+    r"^transformer_blocks\.(0|1|2|45|46|47)\.(attn1|attn2|audio_attn1|audio_attn2|audio_to_video_attn|video_to_audio_attn)\.to_out\.0$",
+    r"^transformer_blocks\.(0|1|2|45|46|47)\.(ff|audio_ff)\.proj_(in|out)$",
 ]
 
 
@@ -182,6 +182,83 @@ def _preferred_module_name(weight_name: str) -> str:
     return _module_name_variants(weight_name)[-1]
 
 
+def _tensor_name_variants(tensor_name: str) -> list[str]:
+    variants = [tensor_name]
+    for suffix in (".weight", ".bias", ".weight_scale", ".input_scale"):
+        if not tensor_name.endswith(suffix):
+            continue
+        module_name = tensor_name[: -len(suffix)]
+        variants.extend(
+            candidate + suffix
+            for candidate in _module_name_variants(f"{module_name}.weight")
+        )
+        break
+
+    deduped: list[str] = []
+    for variant in variants:
+        if variant not in deduped:
+            deduped.append(variant)
+    return deduped
+
+
+def _base_tensor_name_variants(tensor_name: str) -> list[str]:
+    variants = list(_tensor_name_variants(tensor_name))
+    ltx2_aliases: list[str] = []
+    for variant in variants:
+        alias = variant
+        alias = re.sub(r"^audio_adaln_single\.", "audio_time_embed.", alias)
+        alias = re.sub(r"^adaln_single\.", "time_embed.", alias)
+        alias = re.sub(
+            r"^av_ca_audio_scale_shift_adaln_single\.",
+            "av_cross_attn_audio_scale_shift.",
+            alias,
+        )
+        alias = re.sub(
+            r"^av_ca_v2a_gate_adaln_single\.",
+            "av_cross_attn_audio_v2a_gate.",
+            alias,
+        )
+        alias = re.sub(
+            r"^av_ca_a2v_gate_adaln_single\.",
+            "av_cross_attn_video_a2v_gate.",
+            alias,
+        )
+        alias = re.sub(
+            r"^av_ca_video_scale_shift_adaln_single\.",
+            "av_cross_attn_video_scale_shift.",
+            alias,
+        )
+        alias = re.sub(r"^audio_patchify_proj(?=\.|$)", "audio_proj_in", alias)
+        alias = re.sub(r"^patchify_proj(?=\.|$)", "proj_in", alias)
+        alias = re.sub(r"\.q_norm(?=\.|$)", ".norm_q", alias)
+        alias = re.sub(r"\.k_norm(?=\.|$)", ".norm_k", alias)
+        ltx2_aliases.append(alias)
+
+    for alias in ltx2_aliases:
+        if alias not in variants:
+            variants.append(alias)
+    return variants
+
+
+def _resolve_tensor_name(
+    tensor_name: str,
+    weight_map: Mapping[str, str],
+) -> str:
+    for candidate in _base_tensor_name_variants(tensor_name):
+        if candidate in weight_map:
+            return candidate
+    raise KeyError(tensor_name)
+
+
+def _canonicalize_ltx2_output_name(weight_name: str) -> str:
+    for suffix in (".weight_scale", ".input_scale", ".bias", ".weight"):
+        if weight_name.endswith(suffix):
+            module_name = weight_name[: -len(suffix)]
+            canonical_module = _preferred_module_name(f"{module_name}.weight")
+            return canonical_module + suffix
+    return _preferred_module_name(weight_name)
+
+
 def _scale_key_candidates(weight_name: str) -> list[str]:
     candidates = [weight_name]
     if weight_name.startswith("model.diffusion_model."):
@@ -209,13 +286,31 @@ def _is_ltx2_x0_export(
 ) -> bool:
     if config.get("_class_name") != "X0Model":
         return False
-    if not any(name.startswith("model.diffusion_model.") for name in source_weight_map):
+    if not any(
+        name.startswith(prefix)
+        for name in source_weight_map
+        for prefix in ("model.diffusion_model.", "velocity_model.")
+    ):
         return False
     try:
         metadata_config = json.loads(str(source_metadata.get("config", "")))
     except json.JSONDecodeError:
-        return False
-    return isinstance(metadata_config.get("transformer"), dict)
+        metadata_config = None
+
+    if isinstance(metadata_config, dict) and isinstance(
+        metadata_config.get("transformer"), dict
+    ):
+        return True
+
+    return any(
+        ".audio_to_video_attn." in name
+        or ".video_to_audio_attn." in name
+        or ".audio_attn1." in name
+        or ".audio_attn2." in name
+        or ".audio_patchify_proj." in name
+        or ".audio_proj_out." in name
+        for name in source_weight_map
+    )
 
 
 def _build_output_config(
@@ -226,8 +321,15 @@ def _build_output_config(
     is_ltx2_x0_export: bool,
 ) -> dict[str, object]:
     if is_ltx2_x0_export:
-        metadata_config = json.loads(str(source_metadata["config"]))
-        output_config = dict(metadata_config["transformer"])
+        metadata_config_raw = source_metadata.get("config")
+        output_config: dict[str, object] | None = None
+        if metadata_config_raw:
+            metadata_config = json.loads(str(metadata_config_raw))
+            transformer_config = metadata_config.get("transformer")
+            if isinstance(transformer_config, dict):
+                output_config = dict(transformer_config)
+        if output_config is None:
+            output_config = dict(source_config)
         output_config["_class_name"] = "LTX2VideoTransformer3DModel"
     else:
         output_config = dict(source_config)
@@ -237,13 +339,41 @@ def _build_output_config(
 
 
 def _should_keep_ltx2_transformer_key(weight_name: str) -> bool:
-    if not weight_name.startswith("model.diffusion_model."):
+    if not weight_name.startswith(("model.diffusion_model.", "velocity_model.")):
         return False
     connector_prefixes = (
         "model.diffusion_model.audio_embeddings_connector.",
         "model.diffusion_model.video_embeddings_connector.",
+        "velocity_model.audio_embeddings_connector.",
+        "velocity_model.video_embeddings_connector.",
     )
     return not weight_name.startswith(connector_prefixes)
+
+
+def _should_canonicalize_ltx2_output_names(
+    *,
+    model_type: str,
+    class_name: str | None,
+    source_weight_map: Mapping[str, str],
+) -> bool:
+    if not (
+        model_type == "ltx2"
+        or class_name == "LTX2VideoTransformer3DModel"
+        or any(
+            name.startswith(prefix)
+            for name in source_weight_map
+            for prefix in ("model.diffusion_model.", "velocity_model.")
+        )
+    ):
+        return False
+
+    return any(
+        ".audio_to_video_attn." in name
+        or ".video_to_audio_attn." in name
+        or name.startswith("model.diffusion_model.")
+        or name.startswith("velocity_model.")
+        for name in source_weight_map
+    )
 
 
 def get_default_keep_bf16_patterns(
@@ -261,6 +391,8 @@ def get_default_keep_bf16_patterns(
         return list(DEFAULT_FLUX1_KEEP_BF16_PATTERNS)
     if class_name == "Flux2Transformer2DModel":
         return list(DEFAULT_FLUX2_KEEP_BF16_PATTERNS)
+    if class_name == "LTX2VideoTransformer3DModel":
+        return list(DEFAULT_LTX2_KEEP_BF16_PATTERNS)
     return []
 
 
@@ -298,17 +430,22 @@ def is_ignored_by_modelopt(
 def build_fp8_scale_map(
     model_state_dict: Mapping[str, torch.Tensor],
     *,
+    disabled_layer_names: set[str] | None = None,
     maxbound: float = FP8_E4M3_MAXBOUND,
 ) -> dict[str, dict[str, torch.Tensor]]:
     scale_map: dict[str, dict[str, torch.Tensor]] = {}
     for key, value in model_state_dict.items():
         if key.endswith(".weight_quantizer._amax"):
             layer_name = key[: -len(".weight_quantizer._amax")]
+            if disabled_layer_names and layer_name in disabled_layer_names:
+                continue
             scale_map.setdefault(f"{layer_name}.weight", {})["weight_scale"] = (
                 value.detach().to(torch.float32).reshape(1).cpu() / maxbound
             )
         elif key.endswith(".input_quantizer._amax"):
             layer_name = key[: -len(".input_quantizer._amax")]
+            if disabled_layer_names and layer_name in disabled_layer_names:
+                continue
             scale_map.setdefault(f"{layer_name}.weight", {})["input_scale"] = (
                 value.detach().to(torch.float32).reshape(1).cpu() / maxbound
             )
@@ -318,6 +455,42 @@ def build_fp8_scale_map(
         for weight_name, scale_tensors in scale_map.items()
         if {"weight_scale", "input_scale"} <= set(scale_tensors)
     }
+
+
+def extract_disabled_modelopt_layer_names(modelopt_state: Any) -> set[str]:
+    if not isinstance(modelopt_state, Mapping):
+        return set()
+
+    state_entries = modelopt_state.get("modelopt_state_dict")
+    if not isinstance(state_entries, Sequence):
+        return set()
+
+    quantizer_states: dict[str, Mapping[str, Any]] = {}
+    for entry in state_entries:
+        if not isinstance(entry, Sequence) or len(entry) != 2:
+            continue
+        _, state = entry
+        if not isinstance(state, Mapping):
+            continue
+        metadata = state.get("metadata")
+        if not isinstance(metadata, Mapping):
+            continue
+        raw_quantizer_state = metadata.get("quantizer_state")
+        if not isinstance(raw_quantizer_state, Mapping):
+            continue
+        for quantizer_name, quantizer_state in raw_quantizer_state.items():
+            if isinstance(quantizer_name, str) and isinstance(quantizer_state, Mapping):
+                quantizer_states[quantizer_name] = quantizer_state
+
+    disabled_layer_names: set[str] = set()
+    for quantizer_name, quantizer_state in quantizer_states.items():
+        if not bool(quantizer_state.get("_disabled", False)):
+            continue
+        if quantizer_name.endswith(".weight_quantizer"):
+            disabled_layer_names.add(quantizer_name[: -len(".weight_quantizer")])
+        elif quantizer_name.endswith(".input_quantizer"):
+            disabled_layer_names.add(quantizer_name[: -len(".input_quantizer")])
+    return disabled_layer_names
 
 
 def quantize_fp8_weight(
@@ -336,6 +509,15 @@ def quantize_fp8_weight(
 
     quantized = (weight.to(torch.float32) / scale.reshape(1)).to(torch.float8_e4m3fn)
     return quantized.cpu().contiguous()
+
+
+def output_weight_scale_for_modelopt_fp8_source(
+    weight: torch.Tensor,
+    recovered_weight_scale: torch.Tensor,
+) -> torch.Tensor:
+    if weight.dtype == torch.float8_e4m3fn:
+        return torch.ones_like(recovered_weight_scale, dtype=torch.float32)
+    return recovered_weight_scale
 
 
 def _copy_non_shard_files(source_dir: str, output_dir: str) -> None:
@@ -357,15 +539,16 @@ def _load_selected_tensors(
     tensor_names: Iterable[str],
 ) -> dict[str, torch.Tensor]:
     tensors: dict[str, torch.Tensor] = {}
-    names_by_file: dict[str, list[str]] = defaultdict(list)
+    names_by_file: dict[str, list[tuple[str, str]]] = defaultdict(list)
     for name in tensor_names:
-        names_by_file[weight_map[name]].append(name)
+        resolved_name = _resolve_tensor_name(name, weight_map)
+        names_by_file[weight_map[resolved_name]].append((name, resolved_name))
 
-    for filename, names in names_by_file.items():
+    for filename, name_pairs in names_by_file.items():
         shard_path = os.path.join(model_dir, filename)
         with safe_open(shard_path, framework="pt", device="cpu") as f:
-            for name in names:
-                tensors[name] = f.get_tensor(name).contiguous()
+            for original_name, resolved_name in name_pairs:
+                tensors[original_name] = f.get_tensor(resolved_name).contiguous()
     return tensors
 
 
@@ -439,6 +622,11 @@ def build_modelopt_fp8_transformer(
         }
     else:
         source_weight_map = source_weight_map_all
+    canonicalize_ltx2_output_names = _should_canonicalize_ltx2_output_names(
+        model_type=model_type,
+        class_name=class_name if isinstance(class_name, str) else None,
+        source_weight_map=source_weight_map,
+    )
     base_weight_map: dict[str, str] = {}
     if base_dir is not None:
         base_weight_map, _ = _load_weight_map(base_dir)
@@ -449,10 +637,21 @@ def build_modelopt_fp8_transformer(
     )
     fallback_weight_names_set = set(fallback_weight_names)
 
-    backbone_state = torch.load(backbone_ckpt_path, map_location="cpu")[
-        "model_state_dict"
-    ]
-    fp8_scale_map = build_fp8_scale_map(backbone_state, maxbound=maxbound)
+    if fallback_weight_names and base_dir is None:
+        raise ValueError(
+            "BF16 fallback layers were selected, but --base-transformer-dir was not provided."
+        )
+
+    backbone_obj = torch.load(backbone_ckpt_path, map_location="cpu")
+    backbone_state = backbone_obj["model_state_dict"]
+    disabled_layer_names = extract_disabled_modelopt_layer_names(
+        backbone_obj.get("modelopt_state")
+    )
+    fp8_scale_map = build_fp8_scale_map(
+        backbone_state,
+        disabled_layer_names=disabled_layer_names,
+        maxbound=maxbound,
+    )
     quant_algo = str(quant_config.get("quant_algo", "")).upper()
     if quant_algo and "FP8" not in quant_algo:
         raise ValueError(
@@ -544,13 +743,12 @@ def build_modelopt_fp8_transformer(
             if name in fallback_scale_names:
                 del shard_tensors[name]
                 continue
-            if name.endswith(".weight") and is_ignored_by_modelopt(
-                name, ignore_patterns
-            ):
-                preserved_ignored_weight_count += 1
-                continue
             if name in fallback_tensors:
                 shard_tensors[name] = fallback_tensors[name]
+                continue
+            if name.endswith(".weight") and is_ignored_by_modelopt(name, ignore_patterns):
+                preserved_ignored_weight_count += 1
+                continue
             scale_key = _resolve_scale_key(name, fp8_scale_map)
             if (
                 name.endswith(".weight")
@@ -559,14 +757,29 @@ def build_modelopt_fp8_transformer(
                 and name not in fallback_weight_names_set
             ):
                 scale_tensors = fp8_scale_map[scale_key]
+                source_weight = shard_tensors[name]
                 shard_tensors[name] = quantize_fp8_weight(
-                    shard_tensors[name], scale_tensors["weight_scale"]
+                    source_weight, scale_tensors["weight_scale"]
                 )
-                shard_tensors[name[:-7] + ".weight_scale"] = scale_tensors[
-                    "weight_scale"
-                ]
+                shard_tensors[name[:-7] + ".weight_scale"] = (
+                    output_weight_scale_for_modelopt_fp8_source(
+                        source_weight, scale_tensors["weight_scale"]
+                    )
+                )
                 shard_tensors[name[:-7] + ".input_scale"] = scale_tensors["input_scale"]
                 added_scale_count += 2
+
+        if canonicalize_ltx2_output_names:
+            canonical_tensors: dict[str, torch.Tensor] = {}
+            for name, tensor in shard_tensors.items():
+                canonical_name = _canonicalize_ltx2_output_name(name)
+                if canonical_name in canonical_tensors:
+                    raise ValueError(
+                        "Duplicate canonicalized LTX-2 tensor name "
+                        f"{canonical_name!r} derived from {name!r}."
+                    )
+                canonical_tensors[canonical_name] = tensor
+            shard_tensors = canonical_tensors
 
         save_file(shard_tensors, os.path.join(output_path, filename), metadata=metadata)
 

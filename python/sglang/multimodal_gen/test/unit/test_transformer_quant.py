@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+import transformers
 
 partial_json_parser = types.ModuleType("partial_json_parser")
 partial_json_parser_core = types.ModuleType("partial_json_parser.core")
@@ -43,11 +44,25 @@ sys.modules.setdefault(
 )
 sys.modules.setdefault("partial_json_parser.core.options", partial_json_parser_options)
 
+if not hasattr(transformers, "Qwen2_5_VLProcessor"):
+    class _Qwen2_5_VLProcessor:
+        pass
+
+    transformers.Qwen2_5_VLProcessor = _Qwen2_5_VLProcessor
+    sys.modules["transformers"].Qwen2_5_VLProcessor = _Qwen2_5_VLProcessor
+    if hasattr(transformers, "__all__") and "Qwen2_5_VLProcessor" not in transformers.__all__:
+        transformers.__all__.append("Qwen2_5_VLProcessor")
+
+from sglang.multimodal_gen.configs.models.dits.ltx_2 import (
+    LTX2ArchConfig,
+    LTX2Config,
+)
 from sglang.multimodal_gen.runtime.layers.linear import UnquantizedLinearMethod
 from sglang.multimodal_gen.runtime.layers.quantization.configs.nunchaku_config import (
     NunchakuConfig,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
+    ModelOptFp8Config,
     ModelOptFp4Config,
     _prepare_nvfp4_weight_bytes,
 )
@@ -58,6 +73,7 @@ from sglang.multimodal_gen.runtime.loader.transformer_load_utils import (
     resolve_transformer_safetensors_to_load,
 )
 from sglang.multimodal_gen.runtime.models.dits.flux import FluxSingleTransformerBlock
+from sglang.multimodal_gen.runtime.models.dits.ltx_2 import LTX2VideoTransformer3DModel
 from sglang.multimodal_gen.tools.build_modelopt_nvfp4_transformer import (
     _updated_quant_config,
 )
@@ -71,6 +87,14 @@ class _FakeQuantConfig:
     @classmethod
     def get_name(cls):
         return "modelopt_fp4"
+
+
+class _DummyAttentionBackend(torch.nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+    def forward(self, *args, **kwargs):
+        raise NotImplementedError
 
 
 class TestTransformerQuantHelpers(unittest.TestCase):
@@ -198,6 +222,106 @@ class TestTransformerQuantHelpers(unittest.TestCase):
 
         self.assertFalse(server_args.dit_cpu_offload)
         self.assertFalse(server_args.text_encoder_cpu_offload)
+
+    @patch("sglang.multimodal_gen.runtime.layers.linear.get_group_rank", return_value=0)
+    @patch("sglang.multimodal_gen.runtime.layers.linear.get_group_size", return_value=1)
+    @patch(
+        "sglang.multimodal_gen.runtime.layers.linear.get_tp_group", return_value=None
+    )
+    @patch(
+        "sglang.multimodal_gen.runtime.models.dits.ltx_2.LocalAttention",
+        new=_DummyAttentionBackend,
+    )
+    @patch(
+        "sglang.multimodal_gen.runtime.models.dits.ltx_2.USPAttention",
+        new=_DummyAttentionBackend,
+    )
+    @patch(
+        "sglang.multimodal_gen.runtime.models.dits.ltx_2.get_tp_world_size",
+        return_value=1,
+    )
+    def test_ltx2_modelopt_fp8_fallback_uses_state_dict_prefixes(
+        self,
+        _mock_tp_world_size,
+        _mock_tp_group,
+        _mock_group_size,
+        _mock_group_rank,
+    ):
+        quant_config = ModelOptFp8Config(
+            is_checkpoint_fp8_serialized=True,
+            exclude_modules=[
+                "patchify_proj",
+                "audio_patchify_proj",
+                "proj_out",
+                "audio_proj_out",
+                "caption_projection*",
+                "audio_caption_projection*",
+                "adaln_single*",
+                "audio_adaln_single*",
+                "transformer_blocks.0.ff.proj_out",
+                "transformer_blocks.0.audio_ff.proj_out",
+                "transformer_blocks.0.audio_attn2.to_v",
+            ],
+        )
+        config = LTX2Config(
+            arch_config=LTX2ArchConfig(
+                num_layers=1,
+                num_attention_heads=2,
+                attention_head_dim=8,
+                audio_num_attention_heads=2,
+                audio_attention_head_dim=4,
+                in_channels=8,
+                out_channels=8,
+                audio_in_channels=8,
+                audio_out_channels=8,
+                cross_attention_dim=16,
+                audio_cross_attention_dim=8,
+                caption_channels=16,
+                positional_embedding_max_pos=[2, 8, 8],
+                audio_positional_embedding_max_pos=[2],
+            ),
+            quant_config=quant_config,
+        )
+        model = LTX2VideoTransformer3DModel(
+            config=config,
+            hf_config={},
+            quant_config=quant_config,
+        )
+        block = model.transformer_blocks[0]
+
+        self.assertEqual(model.patchify_proj.prefix, "patchify_proj")
+        self.assertEqual(model.audio_patchify_proj.prefix, "audio_patchify_proj")
+        self.assertEqual(model.proj_out.prefix, "proj_out")
+        self.assertEqual(model.audio_proj_out.prefix, "audio_proj_out")
+        self.assertEqual(
+            model.caption_projection.linear_1.prefix, "caption_projection.linear_1"
+        )
+        self.assertEqual(
+            model.adaln_single.emb.timestep_embedder.linear_1.prefix,
+            "adaln_single.emb.timestep_embedder.linear_1",
+        )
+        self.assertEqual(block.ff.proj_out.prefix, "transformer_blocks.0.ff.proj_out")
+        self.assertEqual(
+            block.audio_ff.proj_out.prefix,
+            "transformer_blocks.0.audio_ff.proj_out",
+        )
+        self.assertEqual(
+            block.audio_attn2.to_v.prefix, "transformer_blocks.0.audio_attn2.to_v"
+        )
+        self.assertEqual(block.attn1.to_q.prefix, "transformer_blocks.0.attn1.to_q")
+
+        self.assertIsInstance(model.patchify_proj.quant_method, UnquantizedLinearMethod)
+        self.assertIsInstance(model.proj_out.quant_method, UnquantizedLinearMethod)
+        self.assertIsInstance(
+            block.ff.proj_out.quant_method, UnquantizedLinearMethod
+        )
+        self.assertIsInstance(
+            block.audio_ff.proj_out.quant_method, UnquantizedLinearMethod
+        )
+        self.assertIsInstance(
+            block.audio_attn2.to_v.quant_method, UnquantizedLinearMethod
+        )
+        self.assertNotIsInstance(block.attn1.to_q.quant_method, UnquantizedLinearMethod)
 
     def test_prepare_nvfp4_weight_bytes_swaps_nibbles(self):
         weight = torch.tensor([[0xAB, 0x10]], dtype=torch.uint8)
