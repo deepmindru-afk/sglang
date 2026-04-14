@@ -253,10 +253,15 @@ class SessionAwareCache(BasePrefixCache):
             else:
                 # Mid-processing abort: free tokens allocated during this
                 # turn (beyond slot's pre-abort state), keep slot's KV.
-                if req.kv_allocated_len > slot.kv_allocated_len:
+                # Ceil-align start to page boundary so the paged allocator
+                # doesn't free a partial page containing slot's data.
+                free_start = slot.kv_allocated_len
+                if self.page_size > 1:
+                    free_start = ceil_align(free_start, self.page_size)
+                if free_start < req.kv_allocated_len:
                     tail = self.req_to_token_pool.req_to_token[
                         req.req_pool_idx,
-                        slot.kv_allocated_len : req.kv_allocated_len,
+                        free_start : req.kv_allocated_len,
                     ]
                     self.token_to_kv_pool_allocator.free(tail)
                 req.req_pool_idx = None
