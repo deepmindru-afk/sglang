@@ -202,49 +202,47 @@ class SessionAwareCache(BasePrefixCache):
         prefix_len = min(req.kv_committed_len, len(params.key.token_ids))
 
         # alloc_for_extend will write new KV indices into req_to_token[prefix_len:seq_len],
-        # orphaning slot's tail indices beyond prefix_len. Free only WHOLE
-        # orphaned pages -- the partial page straddling the prefix boundary is
-        # shared between inherited KV and the overwrite zone and must not be
-        # freed. Ceil-align free_start to skip that partial page. The slot/req
-        # lengths are set to prefix_len (not free_start) so accounting stays
-        # exact; ceil_align in session_held_tokens / busy check handles the
-        # physical page overhead.
+        # orphaning slot's tail indices in [prefix_len, slot.kv_allocated_len).
+        # Free that orphaned range, but never below cache_protected_len — those
+        # tokens are tree-locked and freeing them would let the tree evict pages
+        # the slot still references (use-after-free). In the shrink scenario
+        # (prefix_len < cache_protected_len), free_start stays at
+        # cache_protected_len; the gap [prefix_len, cache_protected_len) keeps
+        # tree-locked pages alive and kv_allocated_len >= cache_protected_len
+        # so accounting doesn't double-count between tree-protected and uncached.
         free_start = max(prefix_len, slot.cache_protected_len)
-        if self.page_size > 1:
-            free_start = ceil_align(free_start, self.page_size)
         if free_start < slot.kv_allocated_len:
             tail_indices = self.req_to_token_pool.req_to_token[
                 slot.req_pool_idx, free_start : slot.kv_allocated_len
             ]
             self.token_to_kv_pool_allocator.free(tail_indices)
-
-        # Always clamp slot/req lengths to prefix_len, even when no tail was
-        # freed (e.g. free_start >= kv_allocated_len due to page ceil-align).
-        # Without this, the slot keeps an inflated kv_allocated_len and
-        # accounting over-counts by the partial-page overhead.
-        slot.kv_allocated_len = prefix_len
-        slot.kv_committed_len = min(slot.kv_committed_len, prefix_len)
-        slot.swa_evicted_seqlen = min(slot.swa_evicted_seqlen, prefix_len)
-        req.kv_allocated_len = prefix_len
-        req.kv_committed_len = min(req.kv_committed_len, prefix_len)
-        req.swa_evicted_seqlen = min(req.swa_evicted_seqlen, prefix_len)
+            slot.kv_allocated_len = free_start
+            slot.kv_committed_len = min(slot.kv_committed_len, free_start)
+            slot.swa_evicted_seqlen = min(slot.swa_evicted_seqlen, free_start)
+            req.kv_allocated_len = free_start
+            req.kv_committed_len = min(req.kv_committed_len, free_start)
+            # Clamp req.swa_evicted to prefix_len (not free_start):
+            # prepare_for_extend resets req.kv_allocated_len to seq_len,
+            # which can be < free_start. If swa_evicted stayed at free_start,
+            # decode would have swa_evicted > allocated -> negative uncached.
+            req.swa_evicted_seqlen = min(req.swa_evicted_seqlen, prefix_len)
 
         device_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, :prefix_len
         ].to(dtype=torch.int64)
 
-        # Clamp cache_protected_len to match device_indices length. If the
-        # user's new prompt is shorter than the session's cached prefix
-        # (shrink scenario, e.g. after an abort), prefix_len < slot's full
-        # protected length and returning slot.cache_protected_len unchanged
-        # would break the req.kv_allocated_len >= req.cache_protected_len
-        # invariant in downstream accounting. The slot's underlying lock
-        # length is preserved via slot.cache_protected_len for release.
-        # Floor-align to page_size: busy check asserts cache_protected_len
-        # is page-aligned (tree node boundary).
+        # In the normal case (prefix_len >= cache_protected_len), pass through
+        # slot.cache_protected_len unchanged — it matches the tree lock.
+        # In the shrink case (prefix_len < cache_protected_len), ceil-align
+        # prefix_len: the boundary page is physically inherited and stays
+        # within the tree's lock range, so it belongs to "protected" not
+        # "uncached". Floor-align would leave the boundary page in uncached,
+        # double-counting it with tree.protected_size. kv_allocated_len is
+        # kept at free_start (>= cache_protected_len) so the invariant
+        # kv_allocated_len >= cache_protected_len holds even with ceil-align.
         result_protected = min(slot.cache_protected_len, prefix_len)
         if self.page_size > 1:
-            result_protected = (result_protected // self.page_size) * self.page_size
+            result_protected = ceil_align(result_protected, self.page_size)
         return MatchResult(
             device_indices=device_indices,
             last_device_node=slot.virtual_node,
