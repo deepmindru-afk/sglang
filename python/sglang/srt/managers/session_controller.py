@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 from sglang.srt.managers.io_struct import (
     CloseSessionReqInput,
@@ -94,6 +94,8 @@ class Session:
         self.last_active_time: float = time.monotonic()
         self.req_nodes: Dict[str, SessionReqNode] = {}
         self.close_on_finish: bool = False
+        # Saved by create_req for rollback if the new request is aborted.
+        self._prev_req_node: Optional[Tuple[str, SessionReqNode]] = None
 
     def is_timed_out(self) -> bool:
         if self.timeout is None:
@@ -130,8 +132,9 @@ class Session:
                 abort_message = "Streaming sessions do not support offset."
             elif self.req_nodes:
                 assert len(self.req_nodes) == 1
-                _, last_req_node = self.req_nodes.popitem()
+                last_rid, last_req_node = self.req_nodes.popitem()
                 last_req = last_req_node.req
+                self._prev_req_node = (last_rid, last_req_node)
         elif session_params.replace:
             if session_params.rid is None:
                 for _, req_node in self.req_nodes.items():
@@ -248,6 +251,19 @@ class Session:
             self.req_nodes[req.rid] = new_req_node
 
         return new_req
+
+    def rollback_aborted_req(self, rid: str):
+        """Undo create_req for an aborted request.
+
+        Removes the aborted req from req_nodes and restores the previous
+        successful req, maintaining append-only semantics for streaming
+        sessions.
+        """
+        self.req_nodes.pop(rid, None)
+        if self._prev_req_node is not None:
+            prev_rid, prev_node = self._prev_req_node
+            self.req_nodes[prev_rid] = prev_node
+            self._prev_req_node = None
 
 
 class SessionController:

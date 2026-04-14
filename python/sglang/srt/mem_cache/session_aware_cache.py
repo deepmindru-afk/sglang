@@ -201,53 +201,37 @@ class SessionAwareCache(BasePrefixCache):
         # (no additional -1) — the reservation has already been applied.
         prefix_len = min(req.kv_committed_len, len(params.key.token_ids))
 
-        # alloc_for_extend will write new KV indices into req_to_token[prefix_len:seq_len],
-        # orphaning slot's tail indices in [prefix_len, slot.kv_allocated_len).
-        # Free that orphaned range, but never below cache_protected_len — those
-        # tokens are tree-locked and freeing them would let the tree evict pages
-        # the slot still references (use-after-free). In the shrink scenario
-        # (prefix_len < cache_protected_len), free_start stays at
-        # cache_protected_len; the gap [prefix_len, cache_protected_len) keeps
-        # tree-locked pages alive and kv_allocated_len >= cache_protected_len
-        # so accounting doesn't double-count between tree-protected and uncached.
-        free_start = max(prefix_len, slot.cache_protected_len)
-        if free_start < slot.kv_allocated_len:
+        # Streaming sessions are append-only (session_controller rollback
+        # ensures req_nodes always points to the last successful req).
+        assert prefix_len >= slot.cache_protected_len, (
+            f"streaming session prefix shrank: {prefix_len=} < "
+            f"{slot.cache_protected_len=}"
+        )
+
+        # alloc_for_extend will write new KV indices into
+        # req_to_token[prefix_len:seq_len], orphaning slot's tail indices
+        # in [prefix_len, slot.kv_allocated_len). Free the orphaned range.
+        if prefix_len < slot.kv_allocated_len:
             tail_indices = self.req_to_token_pool.req_to_token[
-                slot.req_pool_idx, free_start : slot.kv_allocated_len
+                slot.req_pool_idx, prefix_len : slot.kv_allocated_len
             ]
             self.token_to_kv_pool_allocator.free(tail_indices)
-            slot.kv_allocated_len = free_start
-            slot.kv_committed_len = min(slot.kv_committed_len, free_start)
-            slot.swa_evicted_seqlen = min(slot.swa_evicted_seqlen, free_start)
-            req.kv_allocated_len = free_start
-            req.kv_committed_len = min(req.kv_committed_len, free_start)
-            # Clamp req.swa_evicted to prefix_len (not free_start):
-            # prepare_for_extend resets req.kv_allocated_len to seq_len,
-            # which can be < free_start. If swa_evicted stayed at free_start,
-            # decode would have swa_evicted > allocated -> negative uncached.
+            slot.kv_allocated_len = prefix_len
+            slot.kv_committed_len = min(slot.kv_committed_len, prefix_len)
+            slot.swa_evicted_seqlen = min(slot.swa_evicted_seqlen, prefix_len)
+            req.kv_allocated_len = prefix_len
+            req.kv_committed_len = min(req.kv_committed_len, prefix_len)
             req.swa_evicted_seqlen = min(req.swa_evicted_seqlen, prefix_len)
 
         device_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, :prefix_len
         ].to(dtype=torch.int64)
 
-        # In the normal case (prefix_len >= cache_protected_len), pass through
-        # slot.cache_protected_len unchanged — it matches the tree lock.
-        # In the shrink case (prefix_len < cache_protected_len), ceil-align
-        # prefix_len: the boundary page is physically inherited and stays
-        # within the tree's lock range, so it belongs to "protected" not
-        # "uncached". Floor-align would leave the boundary page in uncached,
-        # double-counting it with tree.protected_size. kv_allocated_len is
-        # kept at free_start (>= cache_protected_len) so the invariant
-        # kv_allocated_len >= cache_protected_len holds even with ceil-align.
-        result_protected = min(slot.cache_protected_len, prefix_len)
-        if self.page_size > 1:
-            result_protected = ceil_align(result_protected, self.page_size)
         return MatchResult(
             device_indices=device_indices,
             last_device_node=slot.virtual_node,
             last_host_node=slot.virtual_node,
-            cache_protected_len=result_protected,
+            cache_protected_len=slot.cache_protected_len,
         )
 
     def cache_finished_req(self, req: Req, is_insert: bool = True, **kwargs):
@@ -281,32 +265,10 @@ class SessionAwareCache(BasePrefixCache):
             slot = SessionSlot()
             self.slots[session_id] = slot
 
-        # If the session's KV is shrinking (e.g. client sent a shorter
-        # prompt after an abort), free the orphaned tail pages before
-        # save_from_req overwrites the slot's committed length.
-        # Never free tree-protected tokens — those are managed by the tree.
-        if (
-            not is_first
-            and slot.is_holding_kv
-            and req.kv_committed_len < slot.kv_committed_len
-        ):
-            old_end = slot.kv_allocated_len
-            new_end = req.kv_committed_len
-            if self.page_size > 1:
-                new_end = ceil_align(new_end, self.page_size)
-            new_end = max(new_end, slot.cache_protected_len)
-            if new_end < old_end:
-                kv_indices = self.req_to_token_pool.req_to_token[
-                    slot.req_pool_idx, new_end:old_end
-                ]
-                self.token_to_kv_pool_allocator.free(kv_indices)
-            # req.cache_protected_len represents the actual tree-shared prefix
-            # length (from match_prefix). req.kv_committed_len may include
-            # positions that were overwritten by alloc_for_extend with new
-            # indices not in the tree.
-            slot.cache_protected_len = min(
-                slot.cache_protected_len, req.cache_protected_len
-            )
+        # Streaming sessions are append-only: kv_committed only grows.
+        # The shrink guard is no longer needed after the rollback fix
+        # in session_controller ensures req_nodes always points to the
+        # last successful request.
 
         slot.save_from_req(req, is_first=is_first)
 

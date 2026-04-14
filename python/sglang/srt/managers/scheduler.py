@@ -1904,6 +1904,8 @@ class Scheduler(
             error_msg = validate_dflash_request(req)
             if error_msg is not None:
                 req.set_finish_with_abort(error_msg)
+                if req.session is not None:
+                    req.session.rollback_aborted_req(req.rid)
                 self.init_req_max_new_tokens(req)
                 self._add_request_to_queue(req)
                 return
@@ -1931,6 +1933,8 @@ class Scheduler(
                         f"After expanding {len(req.origin_input_ids_unpadded)=} => {len(req.origin_input_ids)} >= {self.max_req_input_len}."
                     )
                 )
+                if req.session is not None:
+                    req.session.rollback_aborted_req(req.rid)
                 self.init_req_max_new_tokens(req)
                 self._add_request_to_queue(req)
                 return
@@ -1946,6 +1950,8 @@ class Scheduler(
         )
         if error_msg:
             req.set_finish_with_abort(error_msg)
+            if req.session is not None:
+                req.session.rollback_aborted_req(req.rid)
             self._add_request_to_queue(req)
             return
 
@@ -1972,6 +1978,8 @@ class Scheduler(
             error_msg = f"{req.logprob_start_len=} is higher than the number of input tokens {len(req.origin_input_ids)=}. Please use a smaller logprob_start_len."
             req.logprob_start_len = -1
             req.set_finish_with_abort(error_msg)
+            if req.session is not None:
+                req.session.rollback_aborted_req(req.rid)
             self._add_request_to_queue(req)
             return
 

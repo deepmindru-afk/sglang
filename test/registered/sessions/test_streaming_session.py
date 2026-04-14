@@ -67,13 +67,17 @@ LEAK_FILLER = (
 
 ABORT_REPRO_CONTEXT_LEN = 512
 ABORT_REPRO_PAGE_SIZE = 16
-ABORT_REPRO_GEN_LEN = 8
+ABORT_REPRO_GEN_LEN = 4
 ABORT_REPRO_SESSIONS = 4
-ABORT_REPRO_WARMUP_TURNS = 2
+ABORT_REPRO_WARMUP_TURNS = 1
 ABORT_REPRO_ROUNDS = 8
-ABORT_REPRO_STREAM_TOKENS = 150
-ABORT_REPRO_ABORT_TOKENS = 320
-ABORT_REPRO_NON_STREAMING_TOKENS = 96
+# Stream/recovery tokens are small so accumulated context stays well within
+# context_length across all rounds. Abort tokens exceed context_length so
+# the server rejects them at the HTTP level (400). The session is unaffected
+# and recovery continues appending normally.
+ABORT_REPRO_STREAM_TOKENS = 16
+ABORT_REPRO_ABORT_TOKENS = 600
+ABORT_REPRO_NON_STREAMING_TOKENS = 16
 ABORT_REPRO_CHUNKED_PREFILL_SIZE = 128
 
 # ---------------------------------------------------------------------------
@@ -140,7 +144,7 @@ async def _abort_repro_generate(
                 ), text
                 return data
             assert resp.status == 400, text
-            assert "maximum allowed length" in text, text
+            assert "maximum allowed length" in text or "context length" in text, text
             return None
 
         assert resp.status == 200, text
