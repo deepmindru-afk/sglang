@@ -237,16 +237,13 @@ def test_nth_mid_abort_nukes_session_slot():
 # code path in cache_finished_req no longer exists.
 
 
-def test_trim_overshoot_caps_swa_evicted_seqlen():
-    """`_trim_overshoot` must mirror `_free_tail`'s SWA bookkeeping cap.
-
-    Spec v2 may overshoot during a finishing round, and SWA can advance
-    `swa_evicted_seqlen` past the post-trim boundary while doing so.
-    Without the cap, save_from_req propagates the stale high-water mark
-    into the slot, and next turn's restore_to_req sets req.swa_evicted_seqlen
-    > origin+finished_len — an inconsistency relative to req_to_token /
-    kv_committed_len that other SWA bookkeeping assumes never happens
-    (the invariant `_free_tail` already enforces on the match_prefix path).
+def test_trim_overshoot_postcondition():
+    """`_trim_overshoot` postcondition: every per-req KV field is capped at
+    target = origin+finished_len, output_ids is truncated, and the tail
+    KV slots are freed. Covers both non-SWA fields (kv_committed_len,
+    kv_allocated_len, output_ids) and SWA bookkeeping (swa_evicted_seqlen)
+    in one shot — same invariant `_free_tail` enforces on the match_prefix
+    path.
     """
     page_size = 1
     req_to_token = torch.arange(128, dtype=torch.int32).reshape(1, 128)
@@ -269,9 +266,7 @@ def test_trim_overshoot_caps_swa_evicted_seqlen():
     target = 38
     assert req.kv_committed_len == target
     assert req.kv_allocated_len == target
-    assert (
-        req.swa_evicted_seqlen == target
-    ), f"swa_evicted_seqlen must be capped at {target}, got {req.swa_evicted_seqlen}"
+    assert req.swa_evicted_seqlen == target
     assert len(req.output_ids) == 12
     # Tail [38, 44) freed by _free_kv_aligned.
     assert len(allocator.freed) == 1
