@@ -1027,31 +1027,7 @@ class TestStreamingSessionEagle(TestStreamingSession):
 
 
 class TestStreamingSessionEagleV2(TestStreamingSession):
-    """Streaming session with EAGLE3 spec v2 (overlap-aware schedule).
-
-    Spec v2 may over-generate beyond max_new_tokens (each verify round
-    accepts M+1 tokens, with no per-token stop check inside the round).
-    response.completion_tokens is capped at max_new_tokens, but
-    slot.kv_committed_len reflects the actual output_ids length minus 1
-    (spec's free-token isn't committed). Per-turn over-generation varies,
-    so a constant inheritance offset doesn't work — skip the strict
-    assertion. The 4 leak tests still validate spec v2 + streaming
-    session under the strict mem check.
-    """
-
-    @unittest.skip(
-        "Spec v2 over-generation makes slot.kv_committed_len drift unevenly "
-        "vs response.completion_tokens; constant kv_inherit_offset can't fit."
-    )
-    def test_kv_cache_inheritance(self, gen_len=12):
-        pass
-
-    @unittest.skip(
-        "Spec v2 variable kv_inherit_offset: strict cached_tokens check "
-        "can't use a constant offset."
-    )
-    def test_nth_mid_abort_recovery(self):
-        pass
+    """Streaming session with EAGLE3 spec v2 (overlap-aware schedule)."""
 
     @classmethod
     def setUpClass(cls):
@@ -1199,25 +1175,7 @@ class TestStreamingSessionEagleRetractLargePage(TestStreamingSession):
 
 
 class TestStreamingSessionEagleV2Retract(TestStreamingSession):
-    """Streaming session with EAGLE3 spec v2 under retract pressure.
-
-    Same kv_inheritance skip as EagleV2 (over-generation drift), plus
-    retract forces KV rollback during verify rounds.
-    """
-
-    @unittest.skip(
-        "Spec v2 over-generation makes slot.kv_committed_len drift unevenly "
-        "vs response.completion_tokens; constant kv_inherit_offset can't fit."
-    )
-    def test_kv_cache_inheritance(self, gen_len=12):
-        pass
-
-    @unittest.skip(
-        "Spec v2 variable kv_inherit_offset: strict cached_tokens check "
-        "can't use a constant offset."
-    )
-    def test_nth_mid_abort_recovery(self):
-        pass
+    """Streaming session with EAGLE3 spec v2 under retract pressure."""
 
     @classmethod
     def setUpClass(cls):
