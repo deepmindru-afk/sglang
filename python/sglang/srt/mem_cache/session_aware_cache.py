@@ -193,10 +193,29 @@ class SessionAwareCache(BasePrefixCache):
 
         slot.restore_to_req(req)
 
-        # logprob_start_len is already forced to -1 for streaming sessions
-        # (in Req.init_next_round_input), so the prefix key is not truncated
-        # and we can directly reuse the committed KV length.
-        prefix_len = min(req.kv_committed_len, max(len(params.key.token_ids) - 1, 0))
+        # init_next_round_input passes token_ids = fill_ids[:input_len-1],
+        # reserving 1 token for prefill so the forward pass can produce
+        # logits to sample the next token. We use token_ids length directly
+        # (no additional -1) — the reservation has already been applied.
+        # min is needed: on retract retry, kv_committed_len can exceed
+        # len(token_ids) by 1 due to the logit-reservation truncation
+        # (fill_ids[:input_len-1]).
+        prefix_len = min(req.kv_committed_len, len(params.key.token_ids))
+
+        # Streaming sessions are append-only (session_controller rollback
+        # ensures req_nodes always points to the last successful req).
+        assert prefix_len >= slot.cache_protected_len, (
+            f"streaming session prefix shrank: {prefix_len=} < "
+            f"{slot.cache_protected_len=}"
+        )
+
+        # Free orphaned tail: alloc_for_extend will overwrite
+        # req_to_token[prefix_len:] with new indices. The range
+        # [prefix_len, kv_allocated_len) has stale indices from the
+        # previous turn's decode (e.g. alloc-commit gap on retract,
+        # or speculative draft tokens).
+        self._free_tail(slot, req, prefix_len)
+
         device_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, :prefix_len
         ].to(dtype=torch.int64)
@@ -255,6 +274,25 @@ class SessionAwareCache(BasePrefixCache):
 
         self._mark_kv_freed(req)
 
+    def _free_tail(self, slot: SessionSlot, req: Req, prefix_len: int):
+        """Free orphaned KV indices in [prefix_len, kv_allocated_len).
+
+        Covers spec draft tokens, decode alloc-commit gap, and the 1-token
+        logit-reserve offset on retract retry. No-op when no tail exists.
+        """
+        if prefix_len >= slot.kv_allocated_len:
+            return
+        tail_indices = self.req_to_token_pool.req_to_token[
+            slot.req_pool_idx, prefix_len : slot.kv_allocated_len
+        ]
+        self.token_to_kv_pool_allocator.free(tail_indices)
+        slot.kv_allocated_len = prefix_len
+        slot.kv_committed_len = min(slot.kv_committed_len, prefix_len)
+        slot.swa_evicted_seqlen = min(slot.swa_evicted_seqlen, prefix_len)
+        req.kv_allocated_len = prefix_len
+        req.kv_committed_len = min(req.kv_committed_len, prefix_len)
+        req.swa_evicted_seqlen = min(req.swa_evicted_seqlen, prefix_len)
+
     @staticmethod
     def _mark_kv_freed(req: Req):
         """Set bookkeeping flags so busy check skips this finished req."""
@@ -298,14 +336,7 @@ class SessionAwareCache(BasePrefixCache):
     # -- Session lifecycle --
 
     def release_session(self, session_id: str):
-        """Release all KV resources held by a streaming session.
-
-        `slot.last_node` + `slot.cache_protected_len` are trusted directly: radix
-        tree splits mutate TreeNode objects in place (see RadixCache._split_node),
-        so a saved TreeNode reference remains valid and the locked prefix length
-        is unchanged. No rematch needed -- and `match_prefix` here would cause
-        further splits that disturb accounting.
-        """
+        """Release all KV resources held by a streaming session."""
         slot = self.slots.pop(session_id, None)
         if slot is None:
             return
