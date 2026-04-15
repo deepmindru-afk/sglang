@@ -279,13 +279,24 @@ class SessionAwareCache(BasePrefixCache):
 
         Covers spec draft tokens, decode alloc-commit gap, and the 1-token
         logit-reserve offset on retract retry. No-op when no tail exists.
+
+        Page-aligned: free_start is ceil-aligned to page_size so we never
+        free a partial page. PagedTokenToKVPoolAllocator.free returns whole
+        pages to the free list (free_index // page_size); freeing tokens
+        that share a page with still-committed tokens would corrupt the
+        page allocator. The tokens in [prefix_len, free_start) stay
+        attached to the slot until release_session frees the whole page.
         """
         if prefix_len >= slot.kv_allocated_len:
             return
-        tail_indices = self.req_to_token_pool.req_to_token[
-            slot.req_pool_idx, prefix_len : slot.kv_allocated_len
-        ]
-        self.token_to_kv_pool_allocator.free(tail_indices)
+        free_start = prefix_len
+        if self.page_size > 1:
+            free_start = ceil_align(free_start, self.page_size)
+        if free_start < slot.kv_allocated_len:
+            tail_indices = self.req_to_token_pool.req_to_token[
+                slot.req_pool_idx, free_start : slot.kv_allocated_len
+            ]
+            self.token_to_kv_pool_allocator.free(tail_indices)
         slot.kv_allocated_len = prefix_len
         slot.kv_committed_len = min(slot.kv_committed_len, prefix_len)
         slot.swa_evicted_seqlen = min(slot.swa_evicted_seqlen, prefix_len)
