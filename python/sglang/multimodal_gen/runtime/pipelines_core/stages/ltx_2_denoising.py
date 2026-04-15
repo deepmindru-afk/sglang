@@ -661,8 +661,10 @@ class LTX2DenoisingStage(DenoisingStage):
             # For LTX-2 packed token latents, SP sharding happens on the time dimension
             # (frames). The model must see local latent frames (RoPE offset is applied
             # inside the model using SP rank).
-            ctx.latent_num_frames_for_model = self._get_video_latent_num_frames_for_model(
-                batch=batch, server_args=server_args, latents=ctx.latents
+            ctx.latent_num_frames_for_model = (
+                self._get_video_latent_num_frames_for_model(
+                    batch=batch, server_args=server_args, latents=ctx.latents
+                )
             )
             ctx.latent_height = (
                 batch.height

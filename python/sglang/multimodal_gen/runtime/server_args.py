@@ -21,10 +21,10 @@ import yaml
 
 from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.configs.models.encoders import T5Config
+from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
 from sglang.multimodal_gen.configs.pipeline_configs.ltx_2 import (
     is_ltx23_native_variant,
 )
-from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
 from sglang.multimodal_gen.configs.quantization.nunchaku import NunchakuSVDQuantArgs
 from sglang.multimodal_gen.runtime.layers.quantization.configs.nunchaku_config import (
     NunchakuConfig,
@@ -389,12 +389,9 @@ class ServerArgs:
                 self.vae_cpu_offload = True
 
     def _adjust_ltx2_two_stage_device_mode(self):
-        is_ltx23_two_stage = (
-            self.pipeline_class_name == "LTX2TwoStagePipeline"
-            and (
-                self._is_ltx23_model_path(self.model_path)
-                or is_ltx23_native_variant(self.pipeline_config.vae_config.arch_config)
-            )
+        is_ltx23_two_stage = self.pipeline_class_name == "LTX2TwoStagePipeline" and (
+            self._is_ltx23_model_path(self.model_path)
+            or is_ltx23_native_variant(self.pipeline_config.vae_config.arch_config)
         )
         if not is_ltx23_two_stage:
             return

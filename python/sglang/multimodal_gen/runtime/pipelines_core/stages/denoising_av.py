@@ -118,9 +118,7 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
         audio_vae=None,
         pipeline=None,
     ):
-        super().__init__(
-            transformer, scheduler, vae, audio_vae, pipeline=pipeline
-        )
+        super().__init__(transformer, scheduler, vae, audio_vae, pipeline=pipeline)
         self.distilled_sigmas = torch.tensor(distilled_sigmas)
 
     @staticmethod

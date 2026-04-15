@@ -1,6 +1,5 @@
 import math
 import os
-from collections.abc import Iterable
 
 import numpy as np
 import torch
@@ -433,9 +432,7 @@ class LTX2TwoStageDeviceManager:
         for name, buffer in module.named_buffers():
             snapshot = buffer_snapshots.get(name)
             if snapshot is None:
-                raise KeyError(
-                    f"Missing CPU buffer snapshot for {module_name}.{name}"
-                )
+                raise KeyError(f"Missing CPU buffer snapshot for {module_name}.{name}")
             buffer.data = snapshot
 
     def _ensure_on_gpu(self, module_name: str) -> None:
@@ -461,7 +458,10 @@ class LTX2TwoStageDeviceManager:
             return
 
         transformer = self.pipeline.get_module("transformer")
-        if transformer is not None and next(transformer.parameters()).device.type == "cpu":
+        if (
+            transformer is not None
+            and next(transformer.parameters()).device.type == "cpu"
+        ):
             transformer.to(get_local_torch_device(), non_blocking=True)
             logger.info(
                 "Pinned stage1 transformer on GPU for LTX-2.3 two-stage startup"
@@ -476,7 +476,9 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._device_manager = LTX2TwoStageDeviceManager(self, self.server_args)
-        self._use_premerged_stage2_transformer = self._device_manager.should_use_premerged()
+        self._use_premerged_stage2_transformer = (
+            self._device_manager.should_use_premerged()
+        )
         self._device_manager.initialize()
 
     @staticmethod
@@ -518,9 +520,7 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
         self._active_lora_phase = None
         self._use_premerged_stage2_transformer = False
 
-    def _initialize_premerged_stage2_transformer(
-        self, server_args: ServerArgs
-    ) -> None:
+    def _initialize_premerged_stage2_transformer(self, server_args: ServerArgs) -> None:
         transformer_path = self._resolve_component_path(
             server_args, "transformer", "transformer"
         )
@@ -534,7 +534,10 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
         self.memory_usages["transformer_2"] = memory_usage
 
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        if self.loaded_adapter_paths.get("ltx2_stage2_distilled") != self._distilled_lora_path:
+        if (
+            self.loaded_adapter_paths.get("ltx2_stage2_distilled")
+            != self._distilled_lora_path
+        ):
             self.load_lora_adapter(
                 self._distilled_lora_path,
                 "ltx2_stage2_distilled",
