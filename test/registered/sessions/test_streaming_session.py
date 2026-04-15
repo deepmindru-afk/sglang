@@ -71,10 +71,6 @@ ABORT_REPRO_GEN_LEN = 4
 ABORT_REPRO_SESSIONS = 4
 ABORT_REPRO_WARMUP_TURNS = 1
 ABORT_REPRO_ROUNDS = 8
-# Stream/recovery tokens are small so accumulated context stays well within
-# context_length across all rounds. Abort tokens exceed context_length so
-# the server rejects them at the HTTP level (400). The session is unaffected
-# and recovery continues appending normally.
 ABORT_REPRO_STREAM_TOKENS = 16
 ABORT_REPRO_ABORT_TOKENS = 600
 ABORT_REPRO_NON_STREAMING_TOKENS = 16
@@ -141,7 +137,7 @@ async def _abort_repro_generate(
                 assert finish_reason.get("type") == "abort", text
                 assert "maximum allowed length" in finish_reason.get(
                     "message", ""
-                ), text
+                ) or "context length" in finish_reason.get("message", ""), text
                 return data
             assert resp.status == 400, text
             assert "maximum allowed length" in text or "context length" in text, text
@@ -646,11 +642,10 @@ class TestStreamingSession(CustomTestCase):
         )
 
     def test_nth_mid_abort_recovery(self) -> None:
-        """Abort a running streaming session request via the abort API and
-        verify the session slot is preserved for the next turn."""
+        """Abort a running streaming session request (nth turn) via the
+        abort API. Session rolls back to last successful turn."""
         requests.post(self.base_url + "/flush_cache")
 
-        # Open session
         resp = requests.post(
             self.base_url + "/open_session",
             json={"capacity_of_str_len": 50000, "streaming": True},
@@ -659,16 +654,13 @@ class TestStreamingSession(CustomTestCase):
         session_id = resp.json()
 
         try:
-            # Turn 1: normal generate to create slot
+            # Turn 1: normal generate to create slot.
             ids_1 = self.tokenizer.encode("Tell me a very long story about a wizard.")
             resp_1 = requests.post(
                 self.base_url + "/generate",
                 json={
                     "input_ids": ids_1,
-                    "sampling_params": {
-                        "temperature": 0,
-                        "max_new_tokens": 16,
-                    },
+                    "sampling_params": {"temperature": 0, "max_new_tokens": 16},
                     "session_params": {"id": session_id, "rid": None},
                 },
                 timeout=30,
@@ -680,7 +672,7 @@ class TestStreamingSession(CustomTestCase):
                 + data_1["meta_info"]["completion_tokens"]
             )
 
-            # Turn 2: start a long generate, then abort mid-decode
+            # Turn 2: long generate, then abort mid-decode.
             ids_2 = self.tokenizer.encode(" Continue the story in great detail.")
 
             import threading
@@ -704,8 +696,6 @@ class TestStreamingSession(CustomTestCase):
 
             t = threading.Thread(target=do_generate)
             t.start()
-
-            # Wait for decode to start, then abort all running requests.
             time.sleep(0.5)
             abort_resp = requests.post(
                 self.base_url + "/abort_request",
@@ -713,10 +703,8 @@ class TestStreamingSession(CustomTestCase):
                 timeout=10,
             )
             self.assertEqual(abort_resp.status_code, 200, abort_resp.text)
-
             t.join(timeout=30)
 
-            # Verify turn 2 was actually aborted mid-processing.
             self.assertIsNotNone(result[0], "Turn 2 should have returned")
             data_2 = result[0].json()
             self.assertEqual(
@@ -725,17 +713,14 @@ class TestStreamingSession(CustomTestCase):
                 "Turn 2 should be aborted, not finished normally",
             )
 
-            # Turn 3: retry until the inflight flag clears (abort processed).
+            # Turn 3: recovery. Rolls back to turn 1.
             ids_3 = self.tokenizer.encode(" What happens next?")
             for attempt in range(20):
                 resp_3 = requests.post(
                     self.base_url + "/generate",
                     json={
                         "input_ids": ids_3,
-                        "sampling_params": {
-                            "temperature": 0,
-                            "max_new_tokens": 8,
-                        },
+                        "sampling_params": {"temperature": 0, "max_new_tokens": 8},
                         "session_params": {"id": session_id, "rid": None},
                     },
                     timeout=30,
@@ -745,8 +730,7 @@ class TestStreamingSession(CustomTestCase):
                 time.sleep(0.5)
             self.assertEqual(resp_3.status_code, 200, resp_3.text)
             data_3 = resp_3.json()
-            # After abort, session rolls back to turn 1 (last successful).
-            # Turn 3's input = turn_1 context + new append (BOS stripped).
+            # prompt_tokens = turn_1_total + append (BOS stripped).
             bos = 1 if ids_3[0] == self.tokenizer.bos_token_id else 0
             expected_prompt_3 = turn_1_total + len(ids_3) - bos
             self.assertEqual(
@@ -760,7 +744,6 @@ class TestStreamingSession(CustomTestCase):
                 json={"session_id": session_id},
             )
 
-        # Server should still be healthy
         health = requests.get(self.base_url + "/health", timeout=10)
         self.assertEqual(health.status_code, 200)
 
@@ -778,7 +761,6 @@ class TestStreamingSession(CustomTestCase):
         session_id = resp.json()
 
         try:
-            # Turn 1: start a long generate, then abort mid-decode.
             ids_1 = self.tokenizer.encode("Tell me a very long story about a wizard.")
 
             import threading
@@ -802,7 +784,6 @@ class TestStreamingSession(CustomTestCase):
 
             t = threading.Thread(target=do_generate)
             t.start()
-
             time.sleep(0.5)
             abort_resp = requests.post(
                 self.base_url + "/abort_request",
@@ -810,7 +791,6 @@ class TestStreamingSession(CustomTestCase):
                 timeout=10,
             )
             self.assertEqual(abort_resp.status_code, 200, abort_resp.text)
-
             t.join(timeout=30)
 
             self.assertIsNotNone(result[0], "Turn 1 should have returned")
@@ -821,17 +801,14 @@ class TestStreamingSession(CustomTestCase):
                 "Turn 1 should be aborted, not finished normally",
             )
 
-            # Turn 2: normal generate after first-request abort.
+            # Turn 2: recovery. No inherited context (req_nodes empty).
             ids_2 = self.tokenizer.encode("Tell me a short joke.")
             for attempt in range(20):
                 resp_2 = requests.post(
                     self.base_url + "/generate",
                     json={
                         "input_ids": ids_2,
-                        "sampling_params": {
-                            "temperature": 0,
-                            "max_new_tokens": 8,
-                        },
+                        "sampling_params": {"temperature": 0, "max_new_tokens": 8},
                         "session_params": {"id": session_id, "rid": None},
                     },
                     timeout=30,
@@ -841,8 +818,6 @@ class TestStreamingSession(CustomTestCase):
                 time.sleep(0.5)
             self.assertEqual(resp_2.status_code, 200, resp_2.text)
             data_2 = resp_2.json()
-            # First request was aborted (finish_req never called), so
-            # req_nodes is empty. Turn 2 has no inherited context.
             self.assertEqual(
                 data_2["meta_info"]["prompt_tokens"],
                 len(ids_2),
@@ -876,10 +851,7 @@ class TestStreamingSession(CustomTestCase):
                 self.base_url + "/generate",
                 json={
                     "input_ids": ids_1,
-                    "sampling_params": {
-                        "temperature": 0,
-                        "max_new_tokens": 16,
-                    },
+                    "sampling_params": {"temperature": 0, "max_new_tokens": 16},
                     "session_params": {"id": session_id, "rid": None},
                 },
                 timeout=30,
@@ -897,10 +869,7 @@ class TestStreamingSession(CustomTestCase):
                 self.base_url + "/generate",
                 json={
                     "input_ids": ids_2,
-                    "sampling_params": {
-                        "temperature": 0,
-                        "max_new_tokens": 8,
-                    },
+                    "sampling_params": {"temperature": 0, "max_new_tokens": 8},
                     "session_params": {
                         "id": session_id,
                         "rid": None,
@@ -909,12 +878,7 @@ class TestStreamingSession(CustomTestCase):
                 },
                 timeout=30,
             )
-            # Pre-abort returns HTTP 400 (rejected by create_req).
-            self.assertIn(
-                resp_2.status_code,
-                (200, 400),
-                resp_2.text,
-            )
+            self.assertIn(resp_2.status_code, (200, 400), resp_2.text)
 
             # Turn 3: normal append. Slot should be intact from turn 1.
             ids_3 = self.tokenizer.encode(" What happens next?")
@@ -922,17 +886,13 @@ class TestStreamingSession(CustomTestCase):
                 self.base_url + "/generate",
                 json={
                     "input_ids": ids_3,
-                    "sampling_params": {
-                        "temperature": 0,
-                        "max_new_tokens": 8,
-                    },
+                    "sampling_params": {"temperature": 0, "max_new_tokens": 8},
                     "session_params": {"id": session_id, "rid": None},
                 },
                 timeout=30,
             )
             self.assertEqual(resp_3.status_code, 200, resp_3.text)
             data_3 = resp_3.json()
-            # Slot preserved from turn 1. Turn 3 inherits turn 1 context.
             bos = 1 if ids_3[0] == self.tokenizer.bos_token_id else 0
             expected_prompt_3 = turn_1_total + len(ids_3) - bos
             self.assertEqual(

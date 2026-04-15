@@ -238,7 +238,7 @@ class SessionAwareCache(BasePrefixCache):
         is_first = slot is None
 
         # Mid-processing abort only. Pre-aborted reqs have session=None
-        # (set in create_req or match_prefix) and never reach here.
+        # (set in match_prefix) and never reach here.
         # Nuke all KV via release_session, delete slot. Token IDs stay
         # in req_nodes (finish_req was never called -> last successful
         # req). Next request re-prefills from scratch.
