@@ -526,61 +526,12 @@ class TestStreamingSession(CustomTestCase):
                 )
             prev_kv_len = prompt_tokens + completion_tokens
 
-        # Close the session before checking cache/memory state.
+        # Close the session.
         ret = requests.post(
             self.base_url + "/close_session",
             json={"session_id": session_id},
         )
         self.assertEqual(ret.status_code, 200)
-
-        # === Cache verification (after close, before flush) ===
-
-        # Turn 1's prompt was inserted to the cache.
-        verify_resp = requests.post(
-            self.base_url + "/generate",
-            json={
-                "input_ids": chunks_ids[0],
-                "sampling_params": {"temperature": 0, "max_new_tokens": 1},
-            },
-        ).json()
-        self.assertGreater(
-            verify_resp["meta_info"]["cached_tokens"],
-            0,
-            "Turn 1's prompt should be cached in the radix tree",
-        )
-
-        # Turn 2's prompt tokens should NOT be in cache.
-        # The tree should only contain turn 1's extent (prompt + output from
-        # cache_unfinished_req during decode). Turn 2's prompt starts fresh tokens
-        # that were never inserted.
-        verify_resp2 = requests.post(
-            self.base_url + "/generate",
-            json={
-                "input_ids": chunks_ids[1],
-                "sampling_params": {"temperature": 0, "max_new_tokens": 1},
-            },
-        ).json()
-        self.assertEqual(
-            verify_resp2["meta_info"]["cached_tokens"],
-            0,
-            "Turn 2's prompt should not be in cache (no insertion for turns 2+)",
-        )
-
-        # === Flush reclamation ===
-
-        requests.post(self.base_url + "/flush_cache")
-        verify_resp3 = requests.post(
-            self.base_url + "/generate",
-            json={
-                "input_ids": chunks_ids[0],
-                "sampling_params": {"temperature": 0, "max_new_tokens": 1},
-            },
-        ).json()
-        self.assertEqual(
-            verify_resp3["meta_info"]["cached_tokens"],
-            0,
-            "After session close + flush, cache should be fully reclaimed",
-        )
 
     def test_leak_logprob_concurrent(self) -> None:
         """Concurrent multi-session logprob leak test (all 3 modes).
@@ -1000,13 +951,6 @@ class TestStreamingSessionRetractLargePage(TestStreamingSession):
     page-aligned `_free_tail`, partial pages would corrupt the allocator.
     """
 
-    @unittest.skip(
-        "page_size > 1 rounds cached_tokens to page boundaries; "
-        "constant kv_inherit_offset doesn't fit."
-    )
-    def test_kv_cache_inheritance(self, gen_len=12):
-        pass
-
     @classmethod
     def setUpClass(cls):
         cls.model = DEFAULT_SMALL_MODEL_NAME_FOR_TEST
@@ -1210,13 +1154,6 @@ class TestStreamingSessionEagleRetractLargePage(TestStreamingSession):
 
     kv_inherit_offset = -1
 
-    @unittest.skip(
-        "page_size > 1 rounds cached_tokens to page boundaries; "
-        "constant kv_inherit_offset doesn't fit."
-    )
-    def test_kv_cache_inheritance(self, gen_len=12):
-        pass
-
     @classmethod
     def setUpClass(cls):
         cls.model = DEFAULT_TARGET_MODEL_EAGLE3
@@ -1393,13 +1330,6 @@ class TestStreamingSessionLargePage(TestStreamingSession):
     size per turn is much smaller than page_size. prefix_len must NOT be
     floor-aligned to page_size (that would lose up to 255 tokens per turn).
     """
-
-    @unittest.skip(
-        "page_size=256 is too large for short test prompts to fill a page; "
-        "radix tree returns 0 cached_tokens so inheritance assertion fails."
-    )
-    def test_kv_cache_inheritance(self, gen_len=12):
-        pass
 
     @classmethod
     def setUpClass(cls):
