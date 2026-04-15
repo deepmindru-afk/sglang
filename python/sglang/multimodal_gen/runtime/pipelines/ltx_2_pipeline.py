@@ -270,22 +270,214 @@ class LTX2Pipeline(_BaseLTX2Pipeline):
         _add_ltx2_decoding_stage(self)
 
 
+class LTX2TwoStageDeviceManager:
+    VALID_MODES = ("legacy", "snapshot", "resident")
+
+    def __init__(self, pipeline: "LTX2TwoStagePipeline", server_args: ServerArgs):
+        self.pipeline = pipeline
+        self.server_args = server_args
+        self.mode = self._resolve_mode(server_args)
+        self._cpu_param_snapshots: dict[str, dict[str, torch.Tensor]] = {}
+        self._cpu_buffer_snapshots: dict[str, dict[str, torch.Tensor]] = {}
+        self._active_phase: str | None = None
+
+    @classmethod
+    def _resolve_mode(cls, server_args: ServerArgs) -> str:
+        mode = server_args.ltx2_two_stage_device_mode
+        if mode is None:
+            env_mode = os.getenv("SGLANG_LTX2_TWO_STAGE_DEVICE_MODE")
+            mode = env_mode.lower() if env_mode else "snapshot"
+        if mode not in cls.VALID_MODES:
+            raise ValueError(
+                f"Invalid ltx2_two_stage_device_mode={mode!r}. "
+                f"Expected one of {cls.VALID_MODES}."
+            )
+        return mode
+
+    def should_use_premerged(self) -> bool:
+        """Whether to keep a premerged stage-2 DiT for LTX-2.3 two-stage.
+
+        We only enable this optimization for native LTX-2.3 two-stage and when
+        users did not explicitly provide a stage-1 LoRA path. `getattr` keeps
+        this check safe even if pipeline attribute initialization order changes.
+        """
+        return (
+            self.mode != "legacy"
+            and self.pipeline._should_merge_stage2_distilled_lora(self.server_args)
+            and getattr(self.pipeline, "_stage1_lora_path", None) is None
+        )
+
+    def initialize(self) -> None:
+        if not self.should_use_premerged():
+            return
+
+        self.pipeline._initialize_premerged_stage2_transformer(self.server_args)
+        if self.mode == "snapshot":
+            self._capture_module_cpu_snapshot("transformer")
+            self._capture_module_cpu_snapshot("transformer_2")
+            self._pin_stage1_transformer_if_beneficial()
+        elif self.mode == "resident":
+            self._ensure_on_gpu("transformer")
+            self._ensure_on_gpu("transformer_2")
+            logger.info(
+                "Using resident LTX-2.3 two-stage transformers mode (both DiTs stay on GPU)"
+            )
+
+        refinement_stage = self.pipeline.get_stage("LTX2RefinementStage")
+        if refinement_stage is not None:
+            refinement_stage.transformer = self.pipeline.get_module("transformer_2")
+
+    def switch_phase(self, phase: str) -> bool:
+        """Switch active two-stage DiT with minimal transfer/sync overhead.
+
+        - `resident`: keep both transformers on GPU and only update phase state.
+        - `snapshot`: release the previous DiT by rebinding to CPU snapshots, and
+          lazily H2D the next DiT when needed.
+        - `legacy`: caller falls back to classic LoRA hot-switch path.
+        """
+        if not self.should_use_premerged():
+            return False
+        if phase == self._active_phase:
+            return True
+
+        if self.mode == "resident":
+            self._ensure_on_gpu("transformer")
+            self._ensure_on_gpu("transformer_2")
+            self._active_phase = phase
+            return True
+
+        if self.server_args.dit_cpu_offload:
+            if phase == "stage1":
+                previous_name, next_name = "transformer_2", "transformer"
+            else:
+                previous_name, next_name = "transformer", "transformer_2"
+
+            previous_module = self.pipeline.get_module(previous_name)
+            next_module = self.pipeline.get_module(next_name)
+            if next(previous_module.parameters()).device.type == "cuda":
+                self._release_module_to_cpu_snapshot(previous_name)
+            if next(next_module.parameters()).device.type == "cpu":
+                next_module.to(get_local_torch_device(), non_blocking=True)
+
+        self._active_phase = phase
+        return True
+
+    def release_premerged_transformers(self) -> None:
+        if not self.should_use_premerged() or self.mode != "snapshot":
+            return
+        for module_name in ("transformer", "transformer_2"):
+            module = self.pipeline.get_module(module_name)
+            if module is not None and next(module.parameters()).device.type == "cuda":
+                self._release_module_to_cpu_snapshot(module_name)
+        if torch.get_device_module().is_available():
+            torch.get_device_module().empty_cache()
+
+    @staticmethod
+    def _clone_cpu_tensor_snapshot(
+        tensor: torch.Tensor, *, pin_memory: bool
+    ) -> torch.Tensor:
+        snapshot = tensor.detach()
+        if snapshot.device.type == "cpu":
+            return snapshot
+
+        cpu_tensor = snapshot.to("cpu")
+        if pin_memory:
+            return cpu_tensor.pin_memory()
+        return cpu_tensor
+
+    def _capture_module_cpu_snapshot(self, module_name: str) -> None:
+        if module_name in self._cpu_param_snapshots:
+            return
+
+        module = self.pipeline.get_module(module_name)
+        if module is None:
+            raise ValueError(f"Module {module_name} is not available.")
+
+        pin_memory = bool(
+            self.server_args.pin_cpu_memory and torch.get_device_module().is_available()
+        )
+        self._cpu_param_snapshots[module_name] = {
+            name: self._clone_cpu_tensor_snapshot(param.data, pin_memory=pin_memory)
+            for name, param in module.named_parameters()
+        }
+        self._cpu_buffer_snapshots[module_name] = {
+            name: self._clone_cpu_tensor_snapshot(buffer.data, pin_memory=pin_memory)
+            for name, buffer in module.named_buffers()
+        }
+
+    def _release_module_to_cpu_snapshot(self, module_name: str) -> None:
+        """Replace module tensors with cached CPU snapshots to avoid D2H copies.
+
+        This does not call `module.to("cpu")`. Instead, parameter and buffer storages
+        are rebound to pre-captured CPU tensors so CUDA storages can be released by
+        the allocator without an explicit D2H transfer.
+        """
+        module = self.pipeline.get_module(module_name)
+        if module is None:
+            return
+
+        param_snapshots = self._cpu_param_snapshots.get(module_name)
+        buffer_snapshots = self._cpu_buffer_snapshots.get(module_name)
+        if param_snapshots is None or buffer_snapshots is None:
+            module.to("cpu")
+            return
+
+        for name, param in module.named_parameters():
+            snapshot = param_snapshots.get(name)
+            if snapshot is None:
+                raise KeyError(
+                    f"Missing CPU parameter snapshot for {module_name}.{name}"
+                )
+            param.data = snapshot
+
+        for name, buffer in module.named_buffers():
+            snapshot = buffer_snapshots.get(name)
+            if snapshot is None:
+                raise KeyError(
+                    f"Missing CPU buffer snapshot for {module_name}.{name}"
+                )
+            buffer.data = snapshot
+
+    def _ensure_on_gpu(self, module_name: str) -> None:
+        module = self.pipeline.get_module(module_name)
+        if module is None:
+            return
+        if next(module.parameters()).device.type == "cpu":
+            module.to(get_local_torch_device(), non_blocking=True)
+
+    def _pin_stage1_transformer_if_beneficial(self) -> None:
+        """Optionally pin stage-1 DiT on GPU to remove first-stage cold H2D stall.
+
+        We only do this on high-VRAM CUDA machines with CPU offload enabled and
+        without FSDP inference. It trades extra steady-state VRAM for lower
+        request latency before the first denoise step.
+        """
+        if (
+            not self.server_args.dit_cpu_offload
+            or self.server_args.use_fsdp_inference
+            or not current_platform.is_cuda()
+            or current_platform.get_device_total_memory() / BYTES_PER_GB < 70
+        ):
+            return
+
+        transformer = self.pipeline.get_module("transformer")
+        if transformer is not None and next(transformer.parameters()).device.type == "cpu":
+            transformer.to(get_local_torch_device(), non_blocking=True)
+            logger.info(
+                "Pinned stage1 transformer on GPU for LTX-2.3 two-stage startup"
+            )
+        self._active_phase = "stage1"
+
+
 class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
     pipeline_name = "LTX2TwoStagePipeline"
     STAGE_2_DISTILLED_SIGMA_VALUES = [0.909375, 0.725, 0.421875, 0.0]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._cpu_param_snapshots: dict[str, dict[str, torch.Tensor]] = {}
-        self._cpu_buffer_snapshots: dict[str, dict[str, torch.Tensor]] = {}
-        if self._use_premerged_stage2_transformer:
-            self._initialize_premerged_stage2_transformer(self.server_args)
-            self._capture_module_cpu_snapshot("transformer")
-            self._capture_module_cpu_snapshot("transformer_2")
-            self._pin_stage1_transformer_if_beneficial(self.server_args)
-            refinement_stage = self.get_stage("LTX2RefinementStage")
-            if refinement_stage is not None:
-                refinement_stage.transformer = self.get_module("transformer_2")
+        self._device_manager = LTX2TwoStageDeviceManager(self, self.server_args)
+        self._use_premerged_stage2_transformer = self._device_manager.should_use_premerged()
+        self._device_manager.initialize()
 
     @staticmethod
     def _should_merge_stage2_distilled_lora(server_args: ServerArgs) -> bool:
@@ -324,10 +516,7 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
         self._stage1_lora_path = server_args.lora_path
         self._stage1_lora_scale = float(server_args.lora_scale)
         self._active_lora_phase = None
-        self._use_premerged_stage2_transformer = (
-            self._should_merge_stage2_distilled_lora(server_args)
-            and self._stage1_lora_path is None
-        )
+        self._use_premerged_stage2_transformer = False
 
     def _initialize_premerged_stage2_transformer(
         self, server_args: ServerArgs
@@ -384,121 +573,15 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
             [1.0],
         )
 
-    def _iter_module_tensors(
-        self, module_name: str
-    ) -> tuple[Iterable[tuple[str, torch.nn.Parameter]], Iterable[tuple[str, torch.Tensor]]]:
-        module = self.get_module(module_name)
-        if module is None:
-            raise ValueError(f"Module {module_name} is not available.")
-        return module.named_parameters(), module.named_buffers()
-
-    @staticmethod
-    def _clone_cpu_tensor_snapshot(
-        tensor: torch.Tensor, *, pin_memory: bool
-    ) -> torch.Tensor:
-        snapshot = tensor.detach()
-        if snapshot.device.type == "cpu":
-            return snapshot
-
-        cpu_tensor = snapshot.to("cpu")
-        if pin_memory:
-            return cpu_tensor.pin_memory()
-        return cpu_tensor
-
-    def _capture_module_cpu_snapshot(self, module_name: str) -> None:
-        if module_name in self._cpu_param_snapshots:
-            return
-
-        pin_memory = bool(
-            self.server_args.pin_cpu_memory and torch.get_device_module().is_available()
-        )
-        params, buffers = self._iter_module_tensors(module_name)
-        self._cpu_param_snapshots[module_name] = {
-            name: self._clone_cpu_tensor_snapshot(param.data, pin_memory=pin_memory)
-            for name, param in params
-        }
-        self._cpu_buffer_snapshots[module_name] = {
-            name: self._clone_cpu_tensor_snapshot(buffer.data, pin_memory=pin_memory)
-            for name, buffer in buffers
-        }
-
-    def _release_module_to_cpu_snapshot(self, module_name: str) -> None:
-        module = self.get_module(module_name)
-        if module is None:
-            return
-
-        param_snapshots = self._cpu_param_snapshots.get(module_name)
-        buffer_snapshots = self._cpu_buffer_snapshots.get(module_name)
-        if param_snapshots is None or buffer_snapshots is None:
-            module.to("cpu")
-            return
-
-        for name, param in module.named_parameters():
-            snapshot = param_snapshots.get(name)
-            if snapshot is None:
-                raise KeyError(
-                    f"Missing CPU parameter snapshot for {module_name}.{name}"
-                )
-            param.data = snapshot
-
-        for name, buffer in module.named_buffers():
-            snapshot = buffer_snapshots.get(name)
-            if snapshot is None:
-                raise KeyError(
-                    f"Missing CPU buffer snapshot for {module_name}.{name}"
-                )
-            buffer.data = snapshot
-
     def release_premerged_transformers_to_cpu_snapshots(self) -> None:
-        for module_name in ("transformer", "transformer_2"):
-            module = self.get_module(module_name)
-            if module is not None and next(module.parameters()).device.type == "cuda":
-                self._release_module_to_cpu_snapshot(module_name)
-        if torch.get_device_module().is_available():
-            torch.get_device_module().empty_cache()
-
-    @staticmethod
-    def _should_pin_stage1_transformer(server_args: ServerArgs) -> bool:
-        return (
-            server_args.dit_cpu_offload
-            and not server_args.use_fsdp_inference
-            and current_platform.is_cuda()
-            and current_platform.get_device_total_memory() / BYTES_PER_GB >= 70
-        )
-
-    def _pin_stage1_transformer_if_beneficial(self, server_args: ServerArgs) -> None:
-        if not self._should_pin_stage1_transformer(server_args):
-            return
-
-        transformer = self.get_module("transformer")
-        if next(transformer.parameters()).device.type == "cpu":
-            transformer.to(get_local_torch_device(), non_blocking=True)
-            logger.info(
-                "Pinned stage1 transformer on GPU for LTX-2.3 two-stage startup"
-            )
-        self._active_lora_phase = "stage1"
+        """Release inactive premerged DiTs according to the selected device mode."""
+        self._device_manager.release_premerged_transformers()
 
     def switch_lora_phase(self, phase: str) -> None:
         if phase == self._active_lora_phase:
             return
 
-        if self._use_premerged_stage2_transformer:
-            if self.server_args.dit_cpu_offload:
-                if phase == "stage1":
-                    previous_name = "transformer_2"
-                    next_name = "transformer"
-                    previous_module = self.get_module("transformer_2")
-                    next_module = self.get_module("transformer")
-                else:
-                    previous_name = "transformer"
-                    next_name = "transformer_2"
-                    previous_module = self.get_module("transformer")
-                    next_module = self.get_module("transformer_2")
-
-                if next(previous_module.parameters()).device.type == "cuda":
-                    self._release_module_to_cpu_snapshot(previous_name)
-                if next(next_module.parameters()).device.type == "cpu":
-                    next_module.to(get_local_torch_device(), non_blocking=True)
+        if self._device_manager.switch_phase(phase):
             self._active_lora_phase = phase
             return
 
