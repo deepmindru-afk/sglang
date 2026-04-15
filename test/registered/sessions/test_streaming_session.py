@@ -66,7 +66,7 @@ LEAK_FILLER = (
 # ---------------------------------------------------------------------------
 
 ABORT_REPRO_CONTEXT_LEN = 512
-ABORT_REPRO_PAGE_SIZE = 16
+ABORT_REPRO_PAGE_SIZE = 256
 ABORT_REPRO_GEN_LEN = 4
 ABORT_REPRO_SESSIONS = 4
 ABORT_REPRO_WARMUP_TURNS = 1
@@ -74,7 +74,7 @@ ABORT_REPRO_ROUNDS = 8
 ABORT_REPRO_STREAM_TOKENS = 16
 ABORT_REPRO_ABORT_TOKENS = 600
 ABORT_REPRO_NON_STREAMING_TOKENS = 16
-ABORT_REPRO_CHUNKED_PREFILL_SIZE = 128
+ABORT_REPRO_CHUNKED_PREFILL_SIZE = 4096
 
 # ---------------------------------------------------------------------------
 # Concurrent logprob constants (multi-session, tests retract under concurrency)
@@ -1021,9 +1021,9 @@ class TestStreamingSessionRetractLargePage(TestStreamingSession):
                 other_args=[
                     "--enable-streaming-session",
                     "--chunked-prefill-size",
-                    "128",
+                    "4096",
                     "--page-size",
-                    "16",
+                    "256",
                 ],
             )
         cls.tokenizer = get_tokenizer(cls.model)
@@ -1236,7 +1236,7 @@ class TestStreamingSessionEagleRetractLargePage(TestStreamingSession):
                     "--enable-streaming-session",
                     "--disable-overlap-schedule",
                     "--chunked-prefill-size",
-                    "128",
+                    "4096",
                     "--dtype=float16",
                     "--speculative-algorithm",
                     "EAGLE3",
@@ -1251,7 +1251,7 @@ class TestStreamingSessionEagleRetractLargePage(TestStreamingSession):
                     "--mem-fraction-static",
                     "0.7",
                     "--page-size",
-                    "16",
+                    "256",
                 ],
             )
         cls.tokenizer = get_tokenizer(cls.model)
