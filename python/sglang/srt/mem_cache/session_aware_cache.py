@@ -183,9 +183,12 @@ class SessionAwareCache(BasePrefixCache):
         if slot is None or slot.req_pool_idx is None:
             return self.inner.match_prefix(params)
 
-        # Pre-aborted req: skip slot restore so alloc_for_extend gets a
-        # fresh pool slot and the session's KV mapping stays intact.
+        # Pre-aborted req (scheduler-level abort, e.g. input too long):
+        # detach from session so cache_finished_req treats it as a normal
+        # req. The slot stays intact for the next request.
         if req.to_finish is not None:
+            req.session.abort_req()
+            req.session = None
             return self.inner.match_prefix(params)
 
         slot.restore_to_req(req)
@@ -234,24 +237,27 @@ class SessionAwareCache(BasePrefixCache):
         slot = self.slots.get(session_id)
         is_first = slot is None
 
-        # Abort = nuke all KV resources, delete slot. Token IDs stay in
-        # req_nodes (finish_req was never called → last successful req).
-        # Next request re-prefills from scratch.
+        # Mid-processing abort only. Pre-aborted reqs have session=None
+        # (set in create_req or match_prefix) and never reach here.
+        # Nuke all KV via release_session, delete slot. Token IDs stay
+        # in req_nodes (finish_req was never called -> last successful
+        # req). Next request re-prefills from scratch.
         if isinstance(req.finished_reason, FINISH_ABORT):
-            slot_pool_idx = slot.req_pool_idx if slot is not None else None
-            if slot is not None:
-                # Extend slot to cover req's decode tokens, then release all.
-                slot.kv_allocated_len = max(slot.kv_allocated_len, req.kv_allocated_len)
-                self.release_session(session_id)
-            # Free transient pool slot if req has a different one from slot.
-            if req.req_pool_idx is not None and req.req_pool_idx != slot_pool_idx:
-                end = req.kv_allocated_len
-                if end > 0:
-                    kv_indices = self.req_to_token_pool.req_to_token[
-                        req.req_pool_idx, :end
-                    ]
-                    self.token_to_kv_pool_allocator.free(kv_indices)
-                self.req_to_token_pool.free_slots.append(req.req_pool_idx)
+            if slot is None:
+                # First-request mid-processing abort: create ephemeral
+                # slot from req state so release_session handles cleanup.
+                # Include last_node/cache_protected_len from the req so
+                # release_session calls dec_lock_ref on the tree lock.
+                slot = SessionSlot(
+                    req_pool_idx=req.req_pool_idx,
+                    kv_allocated_len=req.kv_allocated_len,
+                    last_node=req.last_node,
+                    cache_protected_len=req.cache_protected_len,
+                    swa_uuid_for_lock=req.swa_uuid_for_lock,
+                )
+                self.slots[session_id] = slot
+            slot.kv_allocated_len = max(slot.kv_allocated_len, req.kv_allocated_len)
+            self.release_session(session_id)
             req.req_pool_idx = None
             req.session.abort_req()
             self._mark_kv_freed(req)

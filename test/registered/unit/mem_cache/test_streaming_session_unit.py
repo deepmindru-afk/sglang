@@ -119,7 +119,9 @@ def test_streaming_release_kv_cache_defers_tail_free(monkeypatch):
     assert len(allocator.freed) == 0
 
 
-def test_match_prefix_abort_does_not_restore_live_session_slot():
+def test_preabort_detaches_session_and_preserves_slot():
+    """Pre-aborted req (to_finish set before match_prefix) is detached from
+    the session: session=None, abort_req() called. Slot stays intact."""
     req_to_token = torch.arange(256, dtype=torch.int32).reshape(2, 128)
     req_to_token_pool = SimpleNamespace(req_to_token=req_to_token, free_slots=[])
     allocator = _FakeAllocator()
@@ -153,58 +155,19 @@ def test_match_prefix_abort_does_not_restore_live_session_slot():
         )
     )
 
+    # Req detached from session.
+    assert req.session is None
+    # Slot untouched.
     slot = tree_cache.slots["session-a"]
-    assert req.req_pool_idx == 1
-    assert req.kv_committed_len == 1
-    assert req.kv_allocated_len == 1
     assert slot.req_pool_idx == 0
     assert slot.kv_committed_len == 48
     assert slot.kv_allocated_len == 48
     assert len(result.device_indices) == 0
 
 
-def test_aborted_streaming_turn_preserves_slot_and_accounting(monkeypatch):
-    page_size = 16
-    req_to_token = torch.arange(256, dtype=torch.int32).reshape(2, 128)
-    req_to_token_pool = SimpleNamespace(req_to_token=req_to_token, free_slots=[])
-    allocator = _FakeAllocator()
-    tree_cache = SessionAwareCache(
-        _FakeInnerCache(req_to_token_pool, allocator, page_size)
-    )
-    tree_cache.slots["session-a"] = SessionSlot(
-        req_pool_idx=0,
-        kv_committed_len=48,
-        kv_allocated_len=48,
-        cache_protected_len=16,
-        swa_evicted_seqlen=8,
-        last_node="lock-node",
-    )
-
-    req = _FakeReq("session-a", req_pool_idx=1, committed=5, allocated=23)
-    req.finished_reason = FINISH_ABORT("too long")
-
-    monkeypatch.setattr(
-        "sglang.srt.mem_cache.common.get_global_server_args",
-        lambda: SimpleNamespace(page_size=page_size, speculative_algorithm="eagle"),
-    )
-
-    release_kv_cache(req, tree_cache)
-
-    # Abort nukes the slot (release_session) + frees transient pool slot.
-    assert "session-a" not in tree_cache.slots
-    assert req.kv_committed_freed is True
-    assert req.kv_overallocated_freed is True
-    assert req.req_pool_idx is None
-    assert tree_cache.session_held_tokens() == 0
-    assert tree_cache.session_held_req_count() == 0
-    # Slot's KV freed by release_session + transient freed separately.
-    assert 0 in req_to_token_pool.free_slots  # slot's pool_idx
-    assert 1 in req_to_token_pool.free_slots  # transient pool_idx
-
-
-def test_first_request_abort_does_not_create_slot():
-    """When the very first request on a session is aborted, no slot should
-    be created. The session stays empty for the next attempt."""
+def test_first_mid_abort_nukes_ephemeral_slot():
+    """First-request mid-processing abort: no slot exists yet, ephemeral
+    slot is created from req state and nuked via release_session."""
     page_size = 1
     req_to_token = torch.arange(128, dtype=torch.int32).reshape(1, 128)
     req_to_token_pool = SimpleNamespace(req_to_token=req_to_token, free_slots=[])
@@ -230,8 +193,8 @@ def test_first_request_abort_does_not_create_slot():
     assert req.kv_overallocated_freed is True
 
 
-def test_mid_processing_abort_wipes_session_slot():
-    """When a running streaming session req is aborted mid-processing,
+def test_nth_mid_abort_nukes_session_slot():
+    """Nth-request mid-processing abort: slot exists, restore_to_req ran.
     ALL KV is wiped (release_session). Slot is deleted. Token IDs stay
     in req_nodes for next turn's re-prefill."""
     page_size = 1
