@@ -271,17 +271,12 @@ class SessionAwareCache(BasePrefixCache):
         self._mark_kv_freed(req)
 
     def _free_tail(self, slot: SessionSlot, req: Req, prefix_len: int):
-        """Free orphaned KV indices in [prefix_len, kv_allocated_len).
-
-        Covers spec draft tokens, decode alloc-commit gap, and the 1-token
-        logit-reserve offset on retract retry. No-op when no tail exists.
-
-        Page-aligned: free_start is ceil-aligned to page_size so we never
-        free a partial page. PagedTokenToKVPoolAllocator.free returns whole
-        pages to the free list (free_index // page_size); freeing tokens
-        that share a page with still-committed tokens would corrupt the
-        page allocator. The tokens in [prefix_len, free_start) stay
-        attached to the slot until release_session frees the whole page.
+        """Free KV in [prefix_len, kv_allocated_len) before the next
+        alloc_for_extend overwrites it (spec tail, alloc-commit gap, or
+        logit-reserve offset). Free start is ceil-aligned to page_size:
+        PagedTokenToKVPoolAllocator frees by whole pages, so partial-page
+        free would corrupt pages still holding committed tokens; the gap
+        stays attached until release_session.
         """
         if prefix_len >= slot.kv_allocated_len:
             return
