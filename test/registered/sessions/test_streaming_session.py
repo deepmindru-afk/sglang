@@ -991,6 +991,48 @@ class TestStreamingSessionRetractMixedChunk(TestStreamingSession):
         kill_process_tree(cls.process.pid)
 
 
+class TestStreamingSessionRetractLargePage(TestStreamingSession):
+    """Retract + page_size > 1: covers PagedTokenToKVPoolAllocator path.
+
+    Retract triggers `prefix_len < kv_allocated_len` in `_free_tail`, and
+    page_size > 1 routes through `PagedTokenToKVPoolAllocator.free` (which
+    computes `free_index // page_size` and returns whole pages). Without
+    page-aligned `_free_tail`, partial pages would corrupt the allocator.
+    """
+
+    @unittest.skip(
+        "page_size > 1 rounds cached_tokens to page boundaries; "
+        "constant kv_inherit_offset doesn't fit."
+    )
+    def test_kv_cache_inheritance(self, gen_len=12):
+        pass
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = DEFAULT_SMALL_MODEL_NAME_FOR_TEST
+        cls.base_url = DEFAULT_URL_FOR_TEST
+        with envs.SGLANG_TEST_RETRACT.override(
+            True
+        ), envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.override(2):
+            cls.process = popen_launch_server(
+                cls.model,
+                cls.base_url,
+                timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+                other_args=[
+                    "--enable-streaming-session",
+                    "--chunked-prefill-size",
+                    "128",
+                    "--page-size",
+                    "16",
+                ],
+            )
+        cls.tokenizer = get_tokenizer(cls.model)
+
+    @classmethod
+    def tearDownClass(cls):
+        kill_process_tree(cls.process.pid)
+
+
 class TestStreamingSessionEagle(TestStreamingSession):
     """Streaming session with EAGLE3 speculative decoding.
 
@@ -1151,6 +1193,65 @@ class TestStreamingSessionEagleRetract(TestStreamingSession):
                     "4",
                     "--mem-fraction-static",
                     "0.7",
+                ],
+            )
+        cls.tokenizer = get_tokenizer(cls.model)
+
+    @classmethod
+    def tearDownClass(cls):
+        kill_process_tree(cls.process.pid)
+
+
+class TestStreamingSessionEagleRetractLargePage(TestStreamingSession):
+    """Eagle spec + retract + page_size > 1: hits PagedTokenToKVPoolAllocator
+    with both spec tail and retract alloc-commit gap. Maximal coverage of
+    `_free_tail` page-alignment correctness.
+    """
+
+    kv_inherit_offset = -1
+
+    @unittest.skip(
+        "page_size > 1 rounds cached_tokens to page boundaries; "
+        "constant kv_inherit_offset doesn't fit."
+    )
+    def test_kv_cache_inheritance(self, gen_len=12):
+        pass
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = DEFAULT_TARGET_MODEL_EAGLE3
+        cls.base_url = DEFAULT_URL_FOR_TEST
+        with envs.SGLANG_TEST_RETRACT.override(
+            True
+        ), envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.override(
+            2
+        ), envs.SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN.override(
+            True
+        ):
+            cls.process = popen_launch_server(
+                cls.model,
+                cls.base_url,
+                timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+                other_args=[
+                    "--enable-streaming-session",
+                    "--disable-overlap-schedule",
+                    "--chunked-prefill-size",
+                    "128",
+                    "--dtype=float16",
+                    "--speculative-algorithm",
+                    "EAGLE3",
+                    "--speculative-draft-model",
+                    DEFAULT_DRAFT_MODEL_EAGLE3,
+                    "--speculative-num-steps",
+                    "3",
+                    "--speculative-eagle-topk",
+                    "1",
+                    "--speculative-num-draft-tokens",
+                    "4",
+                    "--mem-fraction-static",
+                    "0.7",
+                    "--page-size",
+                    "16",
                 ],
             )
         cls.tokenizer = get_tokenizer(cls.model)
