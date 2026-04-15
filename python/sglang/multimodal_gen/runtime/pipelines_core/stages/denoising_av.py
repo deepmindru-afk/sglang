@@ -95,8 +95,9 @@ class LTX2AVDenoisingStage(LTX2DenoisingStage):
             if callable(release_to_snapshots):
                 release_to_snapshots()
             else:
-                for dit in filter(None, [self.transformer, self.transformer_2]):
-                    if next(dit.parameters()).device.type == "cuda":
+                for dit in filter(None, [self.transformer]):
+                    param = next(dit.parameters(), None)
+                    if param is not None and param.device.type == "cuda":
                         dit.to("cpu")
                 if torch.get_device_module().is_available():
                     torch.get_device_module().empty_cache()

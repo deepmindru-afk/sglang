@@ -353,9 +353,19 @@ class LTX2TwoStageDeviceManager:
 
             previous_module = self.pipeline.get_module(previous_name)
             next_module = self.pipeline.get_module(next_name)
-            if next(previous_module.parameters()).device.type == "cuda":
+            prev_param = (
+                next(previous_module.parameters(), None)
+                if previous_module is not None
+                else None
+            )
+            if prev_param is not None and prev_param.device.type == "cuda":
                 self._release_module_to_cpu_snapshot(previous_name)
-            if next(next_module.parameters()).device.type == "cpu":
+            next_param = (
+                next(next_module.parameters(), None)
+                if next_module is not None
+                else None
+            )
+            if next_param is not None and next_param.device.type == "cpu":
                 next_module.to(get_local_torch_device(), non_blocking=True)
 
         self._active_phase = phase
@@ -366,7 +376,8 @@ class LTX2TwoStageDeviceManager:
             return
         for module_name in ("transformer", "transformer_2"):
             module = self.pipeline.get_module(module_name)
-            if module is not None and next(module.parameters()).device.type == "cuda":
+            param = next(module.parameters(), None) if module is not None else None
+            if param is not None and param.device.type == "cuda":
                 self._release_module_to_cpu_snapshot(module_name)
         if torch.get_device_module().is_available():
             torch.get_device_module().empty_cache()
@@ -377,6 +388,8 @@ class LTX2TwoStageDeviceManager:
     ) -> torch.Tensor:
         snapshot = tensor.detach()
         if snapshot.device.type == "cpu":
+            if pin_memory and not snapshot.is_pinned():
+                return snapshot.pin_memory()
             return snapshot
 
         cpu_tensor = snapshot.to("cpu")
@@ -439,7 +452,8 @@ class LTX2TwoStageDeviceManager:
         module = self.pipeline.get_module(module_name)
         if module is None:
             return
-        if next(module.parameters()).device.type == "cpu":
+        param = next(module.parameters(), None)
+        if param is not None and param.device.type == "cpu":
             module.to(get_local_torch_device(), non_blocking=True)
 
     def _pin_stage1_transformer_if_beneficial(self) -> None:
@@ -458,10 +472,10 @@ class LTX2TwoStageDeviceManager:
             return
 
         transformer = self.pipeline.get_module("transformer")
-        if (
-            transformer is not None
-            and next(transformer.parameters()).device.type == "cpu"
-        ):
+        param = (
+            next(transformer.parameters(), None) if transformer is not None else None
+        )
+        if transformer is not None and param is not None and param.device.type == "cpu":
             transformer.to(get_local_torch_device(), non_blocking=True)
             logger.info(
                 "Pinned stage1 transformer on GPU for LTX-2.3 two-stage startup"
